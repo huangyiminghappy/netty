@@ -17,16 +17,20 @@ package io.netty.channel.unix;
 
 import io.netty.channel.ChannelException;
 import io.netty.util.CharsetUtil;
+import io.netty.util.NetUtil;
 
 import java.io.IOException;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.PortUnreachableException;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.netty.channel.unix.Errors.ERRNO_EAGAIN_NEGATIVE;
+import static io.netty.channel.unix.Errors.ERROR_ECONNREFUSED_NEGATIVE;
 import static io.netty.channel.unix.Errors.ERRNO_EINPROGRESS_NEGATIVE;
 import static io.netty.channel.unix.Errors.ERRNO_EWOULDBLOCK_NEGATIVE;
 import static io.netty.channel.unix.Errors.ioResult;
@@ -141,6 +145,9 @@ public class Socket extends FileDescriptor {
         if (res >= 0) {
             return res;
         }
+        if (res == ERROR_ECONNREFUSED_NEGATIVE) {
+            throw new PortUnreachableException("sendTo failed");
+        }
         return ioResult("sendTo", res, SEND_TO_CONNECTION_RESET_EXCEPTION, SEND_TO_CLOSED_CHANNEL_EXCEPTION);
     }
 
@@ -162,6 +169,9 @@ public class Socket extends FileDescriptor {
         if (res >= 0) {
             return res;
         }
+        if (res == ERROR_ECONNREFUSED_NEGATIVE) {
+            throw new PortUnreachableException("sendToAddress failed");
+        }
         return ioResult("sendToAddress", res,
                 SEND_TO_ADDRESS_CONNECTION_RESET_EXCEPTION, SEND_TO_ADDRESS_CLOSED_CHANNEL_EXCEPTION);
     }
@@ -182,6 +192,10 @@ public class Socket extends FileDescriptor {
         int res = sendToAddresses(fd, memoryAddress, length, address, scopeId, port);
         if (res >= 0) {
             return res;
+        }
+
+        if (res == ERROR_ECONNREFUSED_NEGATIVE) {
+            throw new PortUnreachableException("sendToAddresses failed");
         }
         return ioResult("sendToAddresses", res,
                 CONNECTION_RESET_EXCEPTION_SENDMSG, SEND_TO_ADDRESSES_CLOSED_CHANNEL_EXCEPTION);
@@ -255,6 +269,13 @@ public class Socket extends FileDescriptor {
             throwConnectException("finishConnect", FINISH_CONNECT_REFUSED_EXCEPTION, res);
         }
         return true;
+    }
+
+    public final void disconnect() throws IOException {
+        int res = disconnect(fd);
+        if (res < 0) {
+            throwConnectException("disconnect", FINISH_CONNECT_REFUSED_EXCEPTION, res);
+        }
     }
 
     public final void bind(SocketAddress socketAddress) throws IOException {
@@ -392,6 +413,8 @@ public class Socket extends FileDescriptor {
                 '}';
     }
 
+    private static final AtomicBoolean INITIALIZED = new AtomicBoolean();
+
     public static Socket newSocketStream() {
         return new Socket(newSocketStream0());
     }
@@ -402,6 +425,12 @@ public class Socket extends FileDescriptor {
 
     public static Socket newSocketDomain() {
         return new Socket(newSocketDomain0());
+    }
+
+    public static void initialize() {
+        if (INITIALIZED.compareAndSet(false, true)) {
+            initialize(NetUtil.isIpV4StackPreferred());
+        }
     }
 
     protected static int newSocketStream0() {
@@ -432,6 +461,7 @@ public class Socket extends FileDescriptor {
     private static native int connect(int fd, byte[] address, int scopeId, int port);
     private static native int connectDomainSocket(int fd, byte[] path);
     private static native int finishConnect(int fd);
+    private static native int disconnect(int fd);
     private static native int bind(int fd, byte[] address, int scopeId, int port);
     private static native int bindDomainSocket(int fd, byte[] path);
     private static native int listen(int fd, int backlog);
@@ -478,4 +508,5 @@ public class Socket extends FileDescriptor {
     private static native void setSoLinger(int fd, int soLinger) throws IOException;
     private static native void setBroadcast(int fd, int broadcast) throws IOException;
     private static native void setTrafficClass(int fd, int trafficClass) throws IOException;
+    private static native void initialize(boolean ipv4Preferred);
 }

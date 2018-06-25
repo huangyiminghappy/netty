@@ -105,7 +105,13 @@ public class JdkSslContext extends SslContext {
             //[3] https://www.ibm.com/developerworks/community/forums/html/topic?id=9b5a56a9-fa46-4031-b33b-df91e28d77c2
             //[4] https://www.ibm.com/developerworks/rfe/execute?use_case=viewRfe&CR_ID=71770
             if (supportedCipher.startsWith("SSL_")) {
-                SUPPORTED_CIPHERS.add("TLS_" + supportedCipher.substring("SSL_".length()));
+                final String tlsPrefixedCipherName = "TLS_" + supportedCipher.substring("SSL_".length());
+                try {
+                    engine.setEnabledCipherSuites(new String[]{tlsPrefixedCipherName});
+                    SUPPORTED_CIPHERS.add(tlsPrefixedCipherName);
+                } catch (IllegalArgumentException ignored) {
+                    // The cipher is not supported ... move on to the next cipher.
+                }
             }
         }
         List<String> ciphers = new ArrayList<String>();
@@ -122,6 +128,7 @@ public class JdkSslContext extends SslContext {
     private final String[] protocols;
     private final String[] cipherSuites;
     private final List<String> unmodifiableCipherSuites;
+    @SuppressWarnings("deprecation")
     private final JdkApplicationProtocolNegotiator apn;
     private final ClientAuth clientAuth;
     private final SSLContext sslContext;
@@ -156,6 +163,7 @@ public class JdkSslContext extends SslContext {
         this(sslContext, isClient, ciphers, cipherFilter, toNegotiator(apn, !isClient), clientAuth, null, false);
     }
 
+    @SuppressWarnings("deprecation")
     JdkSslContext(SSLContext sslContext, boolean isClient, Iterable<String> ciphers, CipherSuiteFilter cipherFilter,
                   JdkApplicationProtocolNegotiator apn, ClientAuth clientAuth, String[] protocols, boolean startTls) {
         super(startTls);
@@ -210,15 +218,16 @@ public class JdkSslContext extends SslContext {
 
     @Override
     public final SSLEngine newEngine(ByteBufAllocator alloc) {
-        return configureAndWrapEngine(context().createSSLEngine());
+        return configureAndWrapEngine(context().createSSLEngine(), alloc);
     }
 
     @Override
     public final SSLEngine newEngine(ByteBufAllocator alloc, String peerHost, int peerPort) {
-        return configureAndWrapEngine(context().createSSLEngine(peerHost, peerPort));
+        return configureAndWrapEngine(context().createSSLEngine(peerHost, peerPort), alloc);
     }
 
-    private SSLEngine configureAndWrapEngine(SSLEngine engine) {
+    @SuppressWarnings("deprecation")
+    private SSLEngine configureAndWrapEngine(SSLEngine engine, ByteBufAllocator alloc) {
         engine.setEnabledCipherSuites(cipherSuites);
         engine.setEnabledProtocols(protocols);
         engine.setUseClientMode(isClient());
@@ -236,7 +245,12 @@ public class JdkSslContext extends SslContext {
                     throw new Error("Unknown auth " + clientAuth);
             }
         }
-        return apn.wrapperFactory().wrapSslEngine(engine, apn, isServer());
+        JdkApplicationProtocolNegotiator.SslEngineWrapperFactory factory = apn.wrapperFactory();
+        if (factory instanceof JdkApplicationProtocolNegotiator.AllocatorAwareSslEngineWrapperFactory) {
+            return ((JdkApplicationProtocolNegotiator.AllocatorAwareSslEngineWrapperFactory) factory)
+                    .wrapSslEngine(engine, alloc, apn, isServer());
+        }
+        return factory.wrapSslEngine(engine, apn, isServer());
     }
 
     @Override
@@ -250,6 +264,7 @@ public class JdkSslContext extends SslContext {
      * @param isServer {@code true} if a server {@code false} otherwise.
      * @return The results of the translation
      */
+    @SuppressWarnings("deprecation")
     static JdkApplicationProtocolNegotiator toNegotiator(ApplicationProtocolConfig config, boolean isServer) {
         if (config == null) {
             return JdkDefaultApplicationProtocolNegotiator.INSTANCE;

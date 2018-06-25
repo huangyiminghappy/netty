@@ -360,6 +360,20 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
     }
 
     /**
+     * Default thread caching behavior - System Property: io.netty.allocator.useCacheForAllThreads - default true
+     */
+    public static boolean defaultUseCacheForAllThreads() {
+        return DEFAULT_USE_CACHE_FOR_ALL_THREADS;
+    }
+
+    /**
+     * Default prefer direct - System Property: io.netty.noPreferDirect - default false
+     */
+    public static boolean defaultPreferDirect() {
+        return PlatformDependent.directBufferPreferred();
+    }
+
+    /**
      * Default tiny cache size - System Property: io.netty.allocator.tinyCacheSize - default 512
      */
     public static int defaultTinyCacheSize() {
@@ -421,12 +435,13 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
             final PoolArena<byte[]> heapArena = leastUsedArena(heapArenas);
             final PoolArena<ByteBuffer> directArena = leastUsedArena(directArenas);
 
-            if (useCacheForAllThreads || Thread.currentThread() instanceof FastThreadLocalThread) {
+            Thread current = Thread.currentThread();
+            if (useCacheForAllThreads || current instanceof FastThreadLocalThread) {
                 return new PoolThreadCache(
                         heapArena, directArena, tinyCacheSize, smallCacheSize, normalCacheSize,
                         DEFAULT_MAX_CACHED_BUFFER_CAPACITY, DEFAULT_CACHE_TRIM_INTERVAL);
             }
-            // No caching for non FastThreadLocalThreads.
+            // No caching so just use 0 as sizes.
             return new PoolThreadCache(heapArena, directArena, 0, 0, 0, 0, 0);
         }
 
@@ -580,7 +595,9 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
     }
 
     final PoolThreadCache threadCache() {
-        return threadCache.get();
+        PoolThreadCache cache =  threadCache.get();
+        assert cache != null;
+        return cache;
     }
 
     /**

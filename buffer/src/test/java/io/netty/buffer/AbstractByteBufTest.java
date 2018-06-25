@@ -37,8 +37,10 @@ import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ScatteringByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.Charset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -786,29 +788,57 @@ public abstract class AbstractByteBufTest {
 
     @Test
     public void testRandomFloatAccess() {
+        testRandomFloatAccess(true);
+    }
+
+    @Test
+    public void testRandomFloatLEAccess() {
+        testRandomFloatAccess(false);
+    }
+
+    private void testRandomFloatAccess(boolean testBigEndian) {
         for (int i = 0; i < buffer.capacity() - 7; i += 8) {
             float value = random.nextFloat();
-            buffer.setFloat(i, value);
+            if (testBigEndian) {
+                buffer.setFloat(i, value);
+            } else {
+                buffer.setFloatLE(i, value);
+            }
         }
 
         random.setSeed(seed);
         for (int i = 0; i < buffer.capacity() - 7; i += 8) {
-            float value = random.nextFloat();
-            assertEquals(value, buffer.getFloat(i), 0.01);
+            float expected = random.nextFloat();
+            float actual = testBigEndian? buffer.getFloat(i) : buffer.getFloatLE(i);
+            assertEquals(expected, actual, 0.01);
         }
     }
 
     @Test
     public void testRandomDoubleAccess() {
+        testRandomDoubleAccess(true);
+    }
+
+    @Test
+    public void testRandomDoubleLEAccess() {
+        testRandomDoubleAccess(false);
+    }
+
+    private void testRandomDoubleAccess(boolean testBigEndian) {
         for (int i = 0; i < buffer.capacity() - 7; i += 8) {
             double value = random.nextDouble();
-            buffer.setDouble(i, value);
+            if (testBigEndian) {
+                buffer.setDouble(i, value);
+            } else {
+                buffer.setDoubleLE(i, value);
+            }
         }
 
         random.setSeed(seed);
         for (int i = 0; i < buffer.capacity() - 7; i += 8) {
-            double value = random.nextDouble();
-            assertEquals(value, buffer.getDouble(i), 0.01);
+            double expected = random.nextDouble();
+            double actual = testBigEndian? buffer.getDouble(i) : buffer.getDoubleLE(i);
+            assertEquals(expected, actual, 0.01);
         }
     }
 
@@ -2054,6 +2084,43 @@ public abstract class AbstractByteBufTest {
         copied.release();
     }
 
+    @Test(timeout = 10000)
+    public void testToStringMultipleThreads() throws Throwable {
+        buffer.clear();
+        buffer.writeBytes("Hello, World!".getBytes(CharsetUtil.ISO_8859_1));
+
+        final AtomicInteger counter = new AtomicInteger(30000);
+        final AtomicReference<Throwable> errorRef = new AtomicReference<Throwable>();
+        List<Thread> threads = new ArrayList<Thread>();
+        for (int i = 0; i < 10; i++) {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        while (errorRef.get() == null && counter.decrementAndGet() > 0) {
+                            assertEquals("Hello, World!", buffer.toString(CharsetUtil.ISO_8859_1));
+                        }
+                    } catch (Throwable cause) {
+                        errorRef.compareAndSet(null, cause);
+                    }
+                }
+            });
+            threads.add(thread);
+        }
+        for (Thread thread : threads) {
+            thread.start();
+        }
+
+        for (Thread thread : threads) {
+            thread.join();
+        }
+
+        Throwable error = errorRef.get();
+        if (error != null) {
+            throw error;
+        }
+    }
+
     @Test
     public void testIndexOf() {
         buffer.clear();
@@ -2616,8 +2683,18 @@ public abstract class AbstractByteBufTest {
     }
 
     @Test(expected = IllegalReferenceCountException.class)
+    public void testGetFloatLEAfterRelease() {
+        releasedBuffer().getFloatLE(0);
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
     public void testGetDoubleAfterRelease() {
         releasedBuffer().getDouble(0);
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testGetDoubleLEAfterRelease() {
+        releasedBuffer().getDoubleLE(0);
     }
 
     @Test(expected = IllegalReferenceCountException.class)
@@ -2920,8 +2997,18 @@ public abstract class AbstractByteBufTest {
     }
 
     @Test(expected = IllegalReferenceCountException.class)
+    public void testReadFloatLEAfterRelease() {
+        releasedBuffer().readFloatLE();
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
     public void testReadDoubleAfterRelease() {
         releasedBuffer().readDouble();
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testReadDoubleLEAfterRelease() {
+        releasedBuffer().readDoubleLE();
     }
 
     @Test(expected = IllegalReferenceCountException.class)
@@ -3050,8 +3137,18 @@ public abstract class AbstractByteBufTest {
     }
 
     @Test(expected = IllegalReferenceCountException.class)
+    public void testWriteFloatLEAfterRelease() {
+        releasedBuffer().writeFloatLE(1);
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
     public void testWriteDoubleAfterRelease() {
         releasedBuffer().writeDouble(1);
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testWriteDoubleLEAfterRelease() {
+        releasedBuffer().writeDoubleLE(1);
     }
 
     @Test(expected = IllegalReferenceCountException.class)
@@ -3220,12 +3317,255 @@ public abstract class AbstractByteBufTest {
         }
     }
 
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testSliceAfterRelease() {
+        releasedBuffer().slice();
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testSliceAfterRelease2() {
+        releasedBuffer().slice(0, 1);
+    }
+
+    private static void assertSliceFailAfterRelease(ByteBuf... bufs) {
+        for (ByteBuf buf : bufs) {
+            if (buf.refCnt() > 0) {
+                buf.release();
+            }
+        }
+        for (ByteBuf buf : bufs) {
+            try {
+                assertEquals(0, buf.refCnt());
+                buf.slice();
+                fail();
+            } catch (IllegalReferenceCountException ignored) {
+                // as expected
+            }
+        }
+    }
+
+    @Test
+    public void testSliceAfterReleaseRetainedSlice() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        assertSliceFailAfterRelease(buf, buf2);
+    }
+
+    @Test
+    public void testSliceAfterReleaseRetainedSliceDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        ByteBuf buf3 = buf2.duplicate();
+        assertSliceFailAfterRelease(buf, buf2, buf3);
+    }
+
+    @Test
+    public void testSliceAfterReleaseRetainedSliceRetainedDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        ByteBuf buf3 = buf2.retainedDuplicate();
+        assertSliceFailAfterRelease(buf, buf2, buf3);
+    }
+
+    @Test
+    public void testSliceAfterReleaseRetainedDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedDuplicate();
+        assertSliceFailAfterRelease(buf, buf2);
+    }
+
+    @Test
+    public void testSliceAfterReleaseRetainedDuplicateSlice() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedDuplicate();
+        ByteBuf buf3 = buf2.slice(0, 1);
+        assertSliceFailAfterRelease(buf, buf2, buf3);
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testRetainedSliceAfterRelease() {
+        releasedBuffer().retainedSlice();
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testRetainedSliceAfterRelease2() {
+        releasedBuffer().retainedSlice(0, 1);
+    }
+
+    private static void assertRetainedSliceFailAfterRelease(ByteBuf... bufs) {
+        for (ByteBuf buf : bufs) {
+            if (buf.refCnt() > 0) {
+                buf.release();
+            }
+        }
+        for (ByteBuf buf : bufs) {
+            try {
+                assertEquals(0, buf.refCnt());
+                buf.retainedSlice();
+                fail();
+            } catch (IllegalReferenceCountException ignored) {
+                // as expected
+            }
+        }
+    }
+
+    @Test
+    public void testRetainedSliceAfterReleaseRetainedSlice() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        assertRetainedSliceFailAfterRelease(buf, buf2);
+    }
+
+    @Test
+    public void testRetainedSliceAfterReleaseRetainedSliceDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        ByteBuf buf3 = buf2.duplicate();
+        assertRetainedSliceFailAfterRelease(buf, buf2, buf3);
+    }
+
+    @Test
+    public void testRetainedSliceAfterReleaseRetainedSliceRetainedDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        ByteBuf buf3 = buf2.retainedDuplicate();
+        assertRetainedSliceFailAfterRelease(buf, buf2, buf3);
+    }
+
+    @Test
+    public void testRetainedSliceAfterReleaseRetainedDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedDuplicate();
+        assertRetainedSliceFailAfterRelease(buf, buf2);
+    }
+
+    @Test
+    public void testRetainedSliceAfterReleaseRetainedDuplicateSlice() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedDuplicate();
+        ByteBuf buf3 = buf2.slice(0, 1);
+        assertRetainedSliceFailAfterRelease(buf, buf2, buf3);
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testDuplicateAfterRelease() {
+        releasedBuffer().duplicate();
+    }
+
+    @Test(expected = IllegalReferenceCountException.class)
+    public void testRetainedDuplicateAfterRelease() {
+        releasedBuffer().retainedDuplicate();
+    }
+
+    private static void assertDuplicateFailAfterRelease(ByteBuf... bufs) {
+        for (ByteBuf buf : bufs) {
+            if (buf.refCnt() > 0) {
+                buf.release();
+            }
+        }
+        for (ByteBuf buf : bufs) {
+            try {
+                assertEquals(0, buf.refCnt());
+                buf.duplicate();
+                fail();
+            } catch (IllegalReferenceCountException ignored) {
+                // as expected
+            }
+        }
+    }
+
+    @Test
+    public void testDuplicateAfterReleaseRetainedSliceDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        ByteBuf buf3 = buf2.duplicate();
+        assertDuplicateFailAfterRelease(buf, buf2, buf3);
+    }
+
+    @Test
+    public void testDuplicateAfterReleaseRetainedDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedDuplicate();
+        assertDuplicateFailAfterRelease(buf, buf2);
+    }
+
+    @Test
+    public void testDuplicateAfterReleaseRetainedDuplicateSlice() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedDuplicate();
+        ByteBuf buf3 = buf2.slice(0, 1);
+        assertDuplicateFailAfterRelease(buf, buf2, buf3);
+    }
+
+    private static void assertRetainedDuplicateFailAfterRelease(ByteBuf... bufs) {
+        for (ByteBuf buf : bufs) {
+            if (buf.refCnt() > 0) {
+                buf.release();
+            }
+        }
+        for (ByteBuf buf : bufs) {
+            try {
+                assertEquals(0, buf.refCnt());
+                buf.retainedDuplicate();
+                fail();
+            } catch (IllegalReferenceCountException ignored) {
+                // as expected
+            }
+        }
+    }
+
+    @Test
+    public void testRetainedDuplicateAfterReleaseRetainedDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedDuplicate();
+        assertRetainedDuplicateFailAfterRelease(buf, buf2);
+    }
+
+    @Test
+    public void testRetainedDuplicateAfterReleaseDuplicate() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.duplicate();
+        assertRetainedDuplicateFailAfterRelease(buf, buf2);
+    }
+
+    @Test
+    public void testRetainedDuplicateAfterReleaseRetainedSlice() {
+        ByteBuf buf = newBuffer(1);
+        ByteBuf buf2 = buf.retainedSlice(0, 1);
+        assertRetainedDuplicateFailAfterRelease(buf, buf2);
+    }
+
     @Test
     public void testSliceRelease() {
         ByteBuf buf = newBuffer(8);
         assertEquals(1, buf.refCnt());
         assertTrue(buf.slice().release());
         assertEquals(0, buf.refCnt());
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    public void testReadSliceOutOfBounds() {
+        testReadSliceOutOfBounds(false);
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    public void testReadRetainedSliceOutOfBounds() {
+        testReadSliceOutOfBounds(true);
+    }
+
+    private void testReadSliceOutOfBounds(boolean retainedSlice) {
+        ByteBuf buf = newBuffer(100);
+        try {
+            buf.writeZero(50);
+            if (retainedSlice) {
+                buf.readRetainedSlice(51);
+            } else {
+                buf.readSlice(51);
+            }
+            fail();
+        } finally {
+            buf.release();
+        }
     }
 
     @Test
@@ -4499,6 +4839,27 @@ public abstract class AbstractByteBufTest {
             buffer.capacity(4);
             assertEquals(4, buffer.capacity());
             assertEquals(13, buffer.maxCapacity());
+        } finally {
+            buffer.release();
+        }
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    public void testReaderIndexLargerThanWriterIndex() {
+        String content1 = "hello";
+        String content2 = "world";
+        int length = content1.length() + content2.length();
+        ByteBuf buffer = newBuffer(length);
+        buffer.setIndex(0, 0);
+        buffer.writeCharSequence(content1, CharsetUtil.US_ASCII);
+        buffer.markWriterIndex();
+        buffer.skipBytes(content1.length());
+        buffer.writeCharSequence(content2, CharsetUtil.US_ASCII);
+        buffer.skipBytes(content2.length());
+        assertTrue(buffer.readerIndex() <= buffer.writerIndex());
+
+        try {
+            buffer.resetWriterIndex();
         } finally {
             buffer.release();
         }

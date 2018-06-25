@@ -21,6 +21,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,9 +30,10 @@ import java.lang.reflect.Method;
 import java.net.URL;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
-import java.util.Locale;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -43,13 +45,10 @@ public final class NativeLibraryLoader {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(NativeLibraryLoader.class);
 
     private static final String NATIVE_RESOURCE_HOME = "META-INF/native/";
-    private static final String OSNAME;
     private static final File WORKDIR;
     private static final boolean DELETE_NATIVE_LIB_AFTER_LOADING;
 
     static {
-        OSNAME = SystemPropertyUtil.get("os.name", "").toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "");
-
         String workdir = SystemPropertyUtil.get("io.netty.native.workdir");
         if (workdir != null) {
             File f = new File(workdir);
@@ -64,99 +63,12 @@ public final class NativeLibraryLoader {
             WORKDIR = f;
             logger.debug("-Dio.netty.native.workdir: " + WORKDIR);
         } else {
-            WORKDIR = tmpdir();
+            WORKDIR = PlatformDependent.tmpdir();
             logger.debug("-Dio.netty.native.workdir: " + WORKDIR + " (io.netty.tmpdir)");
         }
 
         DELETE_NATIVE_LIB_AFTER_LOADING = SystemPropertyUtil.getBoolean(
                 "io.netty.native.deleteLibAfterLoading", true);
-    }
-
-    private static File tmpdir() {
-        File f;
-        try {
-            f = toDirectory(SystemPropertyUtil.get("io.netty.tmpdir"));
-            if (f != null) {
-                logger.debug("-Dio.netty.tmpdir: " + f);
-                return f;
-            }
-
-            f = toDirectory(SystemPropertyUtil.get("java.io.tmpdir"));
-            if (f != null) {
-                logger.debug("-Dio.netty.tmpdir: " + f + " (java.io.tmpdir)");
-                return f;
-            }
-
-            // This shouldn't happen, but just in case ..
-            if (isWindows()) {
-                f = toDirectory(System.getenv("TEMP"));
-                if (f != null) {
-                    logger.debug("-Dio.netty.tmpdir: " + f + " (%TEMP%)");
-                    return f;
-                }
-
-                String userprofile = System.getenv("USERPROFILE");
-                if (userprofile != null) {
-                    f = toDirectory(userprofile + "\\AppData\\Local\\Temp");
-                    if (f != null) {
-                        logger.debug("-Dio.netty.tmpdir: " + f + " (%USERPROFILE%\\AppData\\Local\\Temp)");
-                        return f;
-                    }
-
-                    f = toDirectory(userprofile + "\\Local Settings\\Temp");
-                    if (f != null) {
-                        logger.debug("-Dio.netty.tmpdir: " + f + " (%USERPROFILE%\\Local Settings\\Temp)");
-                        return f;
-                    }
-                }
-            } else {
-                f = toDirectory(System.getenv("TMPDIR"));
-                if (f != null) {
-                    logger.debug("-Dio.netty.tmpdir: " + f + " ($TMPDIR)");
-                    return f;
-                }
-            }
-        } catch (Exception ignored) {
-            // Environment variable inaccessible
-        }
-
-        // Last resort.
-        if (isWindows()) {
-            f = new File("C:\\Windows\\Temp");
-        } else {
-            f = new File("/tmp");
-        }
-
-        logger.warn("Failed to get the temporary directory; falling back to: " + f);
-        return f;
-    }
-
-    @SuppressWarnings("ResultOfMethodCallIgnored")
-    private static File toDirectory(String path) {
-        if (path == null) {
-            return null;
-        }
-
-        File f = new File(path);
-        f.mkdirs();
-
-        if (!f.isDirectory()) {
-            return null;
-        }
-
-        try {
-            return f.getAbsoluteFile();
-        } catch (Exception ignored) {
-            return f;
-        }
-    }
-
-    private static boolean isWindows() {
-        return OSNAME.startsWith("windows");
-    }
-
-    private static boolean isOSX() {
-        return OSNAME.startsWith("macosx") || OSNAME.startsWith("osx");
     }
 
     /**
@@ -167,17 +79,20 @@ public final class NativeLibraryLoader {
      *         if none of the given libraries load successfully.
      */
     public static void loadFirstAvailable(ClassLoader loader, String... names) {
+        List<Throwable> suppressed = new ArrayList<Throwable>();
         for (String name : names) {
             try {
                 load(name, loader);
-                logger.debug("Successfully loaded the library: {}", name);
                 return;
             } catch (Throwable t) {
+                suppressed.add(t);
                 logger.debug("Unable to load the library '{}', trying next name...", name, t);
             }
         }
-        throw new IllegalArgumentException("Failed to load any of the given libraries: "
-                                           + Arrays.toString(names));
+        IllegalArgumentException iae =
+                new IllegalArgumentException("Failed to load any of the given libraries: " + Arrays.toString(names));
+        ThrowableUtil.addSuppressedAndClear(iae, suppressed);
+        throw iae;
     }
 
     /**
@@ -202,36 +117,57 @@ public final class NativeLibraryLoader {
      */
     public static void load(String originalName, ClassLoader loader) {
         // Adjust expected name to support shading of native libraries.
-        String implicitPackagePrefix = calculatePackagePrefix();
-        // The system property should not be necessary; it can be removed in the future.
-        String packagePrefix = SystemPropertyUtil.get("io.netty.packagePrefix", implicitPackagePrefix);
-        String name = packagePrefix.replace('.', '-') + originalName;
+        String name = calculatePackagePrefix().replace('.', '_') + originalName;
+        List<Throwable> suppressed = new ArrayList<Throwable>();
+        try {
+            // first try to load from java.library.path
+            loadLibrary(loader, name, false);
+            return;
+        } catch (Throwable ex) {
+            suppressed.add(ex);
+            logger.debug(
+                    "{} cannot be loaded from java.libary.path, "
+                    + "now trying export to -Dio.netty.native.workdir: {}", name, WORKDIR, ex);
+        }
 
         String libname = System.mapLibraryName(name);
         String path = NATIVE_RESOURCE_HOME + libname;
 
-        URL url = loader.getResource(path);
-        if (url == null && isOSX()) {
-            if (path.endsWith(".jnilib")) {
-                url = loader.getResource(NATIVE_RESOURCE_HOME + "lib" + name + ".dynlib");
-            } else {
-                url = loader.getResource(NATIVE_RESOURCE_HOME + "lib" + name + ".jnilib");
-            }
-        }
-
-        if (url == null) {
-            // Fall back to normal loading of JNI stuff
-            loadLibrary(loader, name, false);
-            return;
-        }
-
-        int index = libname.lastIndexOf('.');
-        String prefix = libname.substring(0, index);
-        String suffix = libname.substring(index, libname.length());
         InputStream in = null;
         OutputStream out = null;
         File tmpFile = null;
+        URL url;
+        if (loader == null) {
+            url = ClassLoader.getSystemResource(path);
+        } else {
+            url = loader.getResource(path);
+        }
         try {
+            if (url == null) {
+                if (PlatformDependent.isOsx()) {
+                    String fileName = path.endsWith(".jnilib") ? NATIVE_RESOURCE_HOME + "lib" + name + ".dynlib" :
+                            NATIVE_RESOURCE_HOME + "lib" + name + ".jnilib";
+                    if (loader == null) {
+                        url = ClassLoader.getSystemResource(fileName);
+                    } else {
+                        url = loader.getResource(fileName);
+                    }
+                    if (url == null) {
+                        FileNotFoundException fnf = new FileNotFoundException(fileName);
+                        ThrowableUtil.addSuppressedAndClear(fnf, suppressed);
+                        throw fnf;
+                    }
+                } else {
+                    FileNotFoundException fnf = new FileNotFoundException(path);
+                    ThrowableUtil.addSuppressedAndClear(fnf, suppressed);
+                    throw fnf;
+                }
+            }
+
+            int index = libname.lastIndexOf('.');
+            String prefix = libname.substring(0, index);
+            String suffix = libname.substring(index, libname.length());
+
             tmpFile = File.createTempFile(prefix, suffix, WORKDIR);
             in = url.openStream();
             out = new FileOutputStream(tmpFile);
@@ -259,13 +195,17 @@ public final class NativeLibraryLoader {
                                 tmpFile.getPath());
                 }
             } catch (Throwable t) {
+                suppressed.add(t);
                 logger.debug("Error checking if {} is on a file store mounted with noexec", tmpFile, t);
             }
             // Re-throw to fail the load
+            ThrowableUtil.addSuppressedAndClear(e, suppressed);
             throw e;
         } catch (Exception e) {
-            throw (UnsatisfiedLinkError) new UnsatisfiedLinkError(
-                    "could not load a native library: " + name).initCause(e);
+            UnsatisfiedLinkError ule = new UnsatisfiedLinkError("could not load a native library: " + name);
+            ule.initCause(e);
+            ThrowableUtil.addSuppressedAndClear(ule, suppressed);
+            throw ule;
         } finally {
             closeQuietly(in);
             closeQuietly(out);
@@ -285,17 +225,29 @@ public final class NativeLibraryLoader {
      * @param absolute - Whether the native library will be loaded by path or by name
      */
     private static void loadLibrary(final ClassLoader loader, final String name, final boolean absolute) {
+        Throwable suppressed = null;
         try {
-            // Make sure the helper is belong to the target ClassLoader.
-            final Class<?> newHelper = tryToLoadClass(loader, NativeLibraryUtil.class);
-            loadLibraryByHelper(newHelper, name, absolute);
-            return;
-        } catch (UnsatisfiedLinkError e) { // Should by pass the UnsatisfiedLinkError here!
-            logger.debug("Unable to load the library '{}', trying other loading mechanism.", name, e);
-        } catch (Exception e) {
-            logger.debug("Unable to load the library '{}', trying other loading mechanism.", name, e);
+            try {
+                // Make sure the helper is belong to the target ClassLoader.
+                final Class<?> newHelper = tryToLoadClass(loader, NativeLibraryUtil.class);
+                loadLibraryByHelper(newHelper, name, absolute);
+                logger.debug("Successfully loaded the library {}", name);
+                return;
+            } catch (UnsatisfiedLinkError e) { // Should by pass the UnsatisfiedLinkError here!
+                suppressed = e;
+                logger.debug("Unable to load the library '{}', trying other loading mechanism.", name, e);
+            } catch (Exception e) {
+                suppressed = e;
+                logger.debug("Unable to load the library '{}', trying other loading mechanism.", name, e);
+            }
+            NativeLibraryUtil.loadLibrary(name, absolute);  // Fallback to local helper class.
+            logger.debug("Successfully loaded the library {}", name);
+        } catch (UnsatisfiedLinkError ule) {
+            if (suppressed != null) {
+                ThrowableUtil.addSuppressed(ule, suppressed);
+            }
+            throw ule;
         }
-        NativeLibraryUtil.loadLibrary(name, absolute);  // Fallback to local helper class.
     }
 
     private static void loadLibraryByHelper(final Class<?> helper, final String name, final boolean absolute)
@@ -315,16 +267,15 @@ public final class NativeLibraryLoader {
             }
         });
         if (ret instanceof Throwable) {
-            Throwable error = (Throwable) ret;
-            Throwable cause = error.getCause();
-            if (cause != null) {
-                if (cause instanceof UnsatisfiedLinkError) {
-                    throw (UnsatisfiedLinkError) cause;
-                } else {
-                    throw new UnsatisfiedLinkError(cause.getMessage());
-                }
+            Throwable t = (Throwable) ret;
+            assert !(t instanceof UnsatisfiedLinkError) : t + " should be a wrapper throwable";
+            Throwable cause = t.getCause();
+            if (cause instanceof UnsatisfiedLinkError) {
+                throw (UnsatisfiedLinkError) cause;
             }
-            throw new UnsatisfiedLinkError(error.getMessage());
+            UnsatisfiedLinkError ule = new UnsatisfiedLinkError(t.getMessage());
+            ule.initCause(t);
+            throw ule;
         }
     }
 
@@ -338,26 +289,41 @@ public final class NativeLibraryLoader {
     private static Class<?> tryToLoadClass(final ClassLoader loader, final Class<?> helper)
             throws ClassNotFoundException {
         try {
-            return loader.loadClass(helper.getName());
-        } catch (ClassNotFoundException e) {
-            // The helper class is NOT found in target ClassLoader, we have to define the helper class.
-            final byte[] classBinary = classToByteArray(helper);
-            return AccessController.doPrivileged(new PrivilegedAction<Class<?>>() {
-                @Override
-                public Class<?> run() {
-                    try {
-                        // Define the helper class in the target ClassLoader,
-                        //  then we can call the helper to load the native library.
-                        Method defineClass = ClassLoader.class.getDeclaredMethod("defineClass", String.class,
-                                byte[].class, int.class, int.class);
-                        defineClass.setAccessible(true);
-                        return (Class<?>) defineClass.invoke(loader, helper.getName(), classBinary, 0,
-                                classBinary.length);
-                    } catch (Exception e) {
-                        throw new IllegalStateException("Define class failed!", e);
+            return Class.forName(helper.getName(), false, loader);
+        } catch (ClassNotFoundException e1) {
+            if (loader == null) {
+                // cannot defineClass inside bootstrap class loader
+                throw e1;
+            }
+            try {
+                // The helper class is NOT found in target ClassLoader, we have to define the helper class.
+                final byte[] classBinary = classToByteArray(helper);
+                return AccessController.doPrivileged(new PrivilegedAction<Class<?>>() {
+                    @Override
+                    public Class<?> run() {
+                        try {
+                            // Define the helper class in the target ClassLoader,
+                            //  then we can call the helper to load the native library.
+                            Method defineClass = ClassLoader.class.getDeclaredMethod("defineClass", String.class,
+                                    byte[].class, int.class, int.class);
+                            defineClass.setAccessible(true);
+                            return (Class<?>) defineClass.invoke(loader, helper.getName(), classBinary, 0,
+                                    classBinary.length);
+                        } catch (Exception e) {
+                            throw new IllegalStateException("Define class failed!", e);
+                        }
                     }
-                }
-            });
+                });
+            } catch (ClassNotFoundException e2) {
+                ThrowableUtil.addSuppressed(e2, e1);
+                throw e2;
+            } catch (RuntimeException e2) {
+                ThrowableUtil.addSuppressed(e2, e1);
+                throw e2;
+            } catch (Error e2) {
+                ThrowableUtil.addSuppressed(e2, e1);
+                throw e2;
+            }
         }
     }
 

@@ -72,13 +72,15 @@ public final class PlatformDependent {
             "\\s*-XX:MaxDirectMemorySize\\s*=\\s*([0-9]+)\\s*([kKmMgG]?)\\s*$");
 
     private static final boolean IS_WINDOWS = isWindows0();
+    private static final boolean IS_OSX = isOsx0();
+
     private static final boolean MAYBE_SUPER_USER;
 
     private static final boolean CAN_ENABLE_TCP_NODELAY_BY_DEFAULT = !isAndroid();
 
-    private static final boolean HAS_UNSAFE = hasUnsafe0();
+    private static final Throwable UNSAFE_UNAVAILABILITY_CAUSE = unsafeUnavailabilityCause0();
     private static final boolean DIRECT_BUFFER_PREFERRED =
-            HAS_UNSAFE && !SystemPropertyUtil.getBoolean("io.netty.noPreferDirect", false);
+            UNSAFE_UNAVAILABILITY_CAUSE == null && !SystemPropertyUtil.getBoolean("io.netty.noPreferDirect", false);
     private static final long MAX_DIRECT_MEMORY = maxDirectMemory0();
 
     private static final int MPSC_CHUNK_SIZE =  1024;
@@ -90,6 +92,8 @@ public final class PlatformDependent {
     private static final File TMPDIR = tmpdir0();
 
     private static final int BIT_MODE = bitMode0();
+    private static final String NORMALIZED_ARCH = normalizeArch(SystemPropertyUtil.get("os.arch", ""));
+    private static final String NORMALIZED_OS = normalizeOs(SystemPropertyUtil.get("os.name", ""));
 
     private static final int ADDRESS_SIZE = addressSize0();
     private static final boolean USE_DIRECT_BUFFER_NO_CLEANER;
@@ -188,6 +192,10 @@ public final class PlatformDependent {
         }
     }
 
+    public static boolean hasDirectBufferNoCleanerConstructor() {
+        return PlatformDependent0.hasDirectBufferNoCleanerConstructor();
+    }
+
     public static byte[] allocateUninitializedArray(int size) {
         return UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD < 0 || UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD > size ?
                 new byte[size] : PlatformDependent0.allocateUninitializedArray(size);
@@ -205,6 +213,13 @@ public final class PlatformDependent {
      */
     public static boolean isWindows() {
         return IS_WINDOWS;
+    }
+
+    /**
+     * Return {@code true} if the JVM is running on OSX / MacOS
+     */
+    public static boolean isOsx() {
+        return IS_OSX;
     }
 
     /**
@@ -234,7 +249,14 @@ public final class PlatformDependent {
      * direct memory access.
      */
     public static boolean hasUnsafe() {
-        return HAS_UNSAFE;
+        return UNSAFE_UNAVAILABILITY_CAUSE == null;
+    }
+
+    /**
+     * Return the reason (if any) why {@code sun.misc.Unsafe} was not available.
+     */
+    public static Throwable getUnsafeUnavailabilityCause() {
+        return UNSAFE_UNAVAILABILITY_CAUSE;
     }
 
     /**
@@ -923,6 +945,17 @@ public final class PlatformDependent {
         return windows;
     }
 
+    private static boolean isOsx0() {
+        String osname = SystemPropertyUtil.get("os.name", "").toLowerCase(Locale.US)
+                .replaceAll("[^a-z0-9]+", "");
+        boolean osx = osname.startsWith("macosx") || osname.startsWith("osx");
+
+        if (osx) {
+            logger.debug("Platform: MacOS");
+        }
+        return osx;
+    }
+
     private static boolean maybeSuperUser0() {
         String username = SystemPropertyUtil.get("user.name");
         if (isWindows()) {
@@ -932,35 +965,47 @@ public final class PlatformDependent {
         return "root".equals(username) || "toor".equals(username);
     }
 
-    private static boolean hasUnsafe0() {
+    private static Throwable unsafeUnavailabilityCause0() {
         if (isAndroid()) {
             logger.debug("sun.misc.Unsafe: unavailable (Android)");
-            return false;
+            return new UnsupportedOperationException("sun.misc.Unsafe: unavailable (Android)");
         }
-
-        if (PlatformDependent0.isExplicitNoUnsafe()) {
-            return false;
+        Throwable cause = PlatformDependent0.getUnsafeUnavailabilityCause();
+        if (cause != null) {
+            return cause;
         }
 
         try {
             boolean hasUnsafe = PlatformDependent0.hasUnsafe();
             logger.debug("sun.misc.Unsafe: {}", hasUnsafe ? "available" : "unavailable");
-            return hasUnsafe;
-        } catch (Throwable ignored) {
+            return hasUnsafe ? null : PlatformDependent0.getUnsafeUnavailabilityCause();
+        } catch (Throwable t) {
+            logger.trace("Could not determine if Unsafe is available", t);
             // Probably failed to initialize PlatformDependent0.
-            return false;
+            return new UnsupportedOperationException("Could not determine if Unsafe is available", t);
         }
     }
 
     private static long maxDirectMemory0() {
         long maxDirectMemory = 0;
+
         ClassLoader systemClassLoader = null;
         try {
-            // Try to get from sun.misc.VM.maxDirectMemory() which should be most accurate.
             systemClassLoader = getSystemClassLoader();
-            Class<?> vmClass = Class.forName("sun.misc.VM", true, systemClassLoader);
-            Method m = vmClass.getDeclaredMethod("maxDirectMemory");
-            maxDirectMemory = ((Number) m.invoke(null)).longValue();
+
+            // When using IBM J9 / Eclipse OpenJ9 we should not use VM.maxDirectMemory() as it not reflects the
+            // correct value.
+            // See:
+            //  - https://github.com/netty/netty/issues/7654
+            String vmName = SystemPropertyUtil.get("java.vm.name", "").toLowerCase();
+            if (!vmName.startsWith("ibm j9") &&
+                    // https://github.com/eclipse/openj9/blob/openj9-0.8.0/runtime/include/vendor_version.h#L53
+                    !vmName.startsWith("eclipse openj9")) {
+                // Try to get from sun.misc.VM.maxDirectMemory() which should be most accurate.
+                Class<?> vmClass = Class.forName("sun.misc.VM", true, systemClassLoader);
+                Method m = vmClass.getDeclaredMethod("maxDirectMemory");
+                maxDirectMemory = ((Number) m.invoke(null)).longValue();
+            }
         } catch (Throwable ignored) {
             // Ignore
         }
@@ -1204,6 +1249,99 @@ public final class PlatformDependent {
         default:
             return hash;
         }
+    }
+
+    public static String normalizedArch() {
+        return NORMALIZED_ARCH;
+    }
+
+    public static String normalizedOs() {
+        return NORMALIZED_OS;
+    }
+
+    private static String normalize(String value) {
+        return value.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "");
+    }
+
+    private static String normalizeArch(String value) {
+        value = normalize(value);
+        if (value.matches("^(x8664|amd64|ia32e|em64t|x64)$")) {
+            return "x86_64";
+        }
+        if (value.matches("^(x8632|x86|i[3-6]86|ia32|x32)$")) {
+            return "x86_32";
+        }
+        if (value.matches("^(ia64|itanium64)$")) {
+            return "itanium_64";
+        }
+        if (value.matches("^(sparc|sparc32)$")) {
+            return "sparc_32";
+        }
+        if (value.matches("^(sparcv9|sparc64)$")) {
+            return "sparc_64";
+        }
+        if (value.matches("^(arm|arm32)$")) {
+            return "arm_32";
+        }
+        if ("aarch64".equals(value)) {
+            return "aarch_64";
+        }
+        if (value.matches("^(ppc|ppc32)$")) {
+            return "ppc_32";
+        }
+        if ("ppc64".equals(value)) {
+            return "ppc_64";
+        }
+        if ("ppc64le".equals(value)) {
+            return "ppcle_64";
+        }
+        if ("s390".equals(value)) {
+            return "s390_32";
+        }
+        if ("s390x".equals(value)) {
+            return "s390_64";
+        }
+
+        return "unknown";
+    }
+
+    private static String normalizeOs(String value) {
+        value = normalize(value);
+        if (value.startsWith("aix")) {
+            return "aix";
+        }
+        if (value.startsWith("hpux")) {
+            return "hpux";
+        }
+        if (value.startsWith("os400")) {
+            // Avoid the names such as os4000
+            if (value.length() <= 5 || !Character.isDigit(value.charAt(5))) {
+                return "os400";
+            }
+        }
+        if (value.startsWith("linux")) {
+            return "linux";
+        }
+        if (value.startsWith("macosx") || value.startsWith("osx")) {
+            return "osx";
+        }
+        if (value.startsWith("freebsd")) {
+            return "freebsd";
+        }
+        if (value.startsWith("openbsd")) {
+            return "openbsd";
+        }
+        if (value.startsWith("netbsd")) {
+            return "netbsd";
+        }
+        if (value.startsWith("solaris") || value.startsWith("sunos")) {
+            return "sunos";
+        }
+        if (value.startsWith("windows")) {
+            return "windows";
+        }
+
+        return "unknown";
     }
 
     private static final class AtomicLongCounter extends AtomicLong implements LongCounter {

@@ -43,7 +43,7 @@ import java.nio.ByteBuffer;
  */
 public class WebSocketClientHandshaker00 extends WebSocketClientHandshaker {
 
-    private static final AsciiString WEBSOCKET = new AsciiString("WebSocket");
+    private static final AsciiString WEBSOCKET = AsciiString.cached("WebSocket");
 
     private ByteBuf expectedChallengeResponseBytes;
 
@@ -127,26 +127,25 @@ public class WebSocketClientHandshaker00 extends WebSocketClientHandshaker {
         // Get path
         URI wsURL = uri();
         String path = rawPath(wsURL);
-        int wsPort = websocketPort(wsURL);
-        String host = wsURL.getHost();
 
         // Format request
         FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, path);
         HttpHeaders headers = request.headers();
-        headers.add(HttpHeaderNames.UPGRADE, WEBSOCKET)
-               .add(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE)
-               .add(HttpHeaderNames.HOST, websocketHostValue(wsURL))
-               .add(HttpHeaderNames.ORIGIN, websocketOriginValue(host, wsPort))
-               .add(HttpHeaderNames.SEC_WEBSOCKET_KEY1, key1)
-               .add(HttpHeaderNames.SEC_WEBSOCKET_KEY2, key2);
-
-        String expectedSubprotocol = expectedSubprotocol();
-        if (expectedSubprotocol != null && !expectedSubprotocol.isEmpty()) {
-            headers.add(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, expectedSubprotocol);
-        }
 
         if (customHeaders != null) {
             headers.add(customHeaders);
+        }
+
+        headers.set(HttpHeaderNames.UPGRADE, WEBSOCKET)
+               .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE)
+               .set(HttpHeaderNames.HOST, websocketHostValue(wsURL))
+               .set(HttpHeaderNames.ORIGIN, websocketOriginValue(wsURL))
+               .set(HttpHeaderNames.SEC_WEBSOCKET_KEY1, key1)
+               .set(HttpHeaderNames.SEC_WEBSOCKET_KEY2, key2);
+
+        String expectedSubprotocol = expectedSubprotocol();
+        if (expectedSubprotocol != null && !expectedSubprotocol.isEmpty()) {
+            headers.set(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, expectedSubprotocol);
         }
 
         // Set Content-Length to workaround some known defect.
@@ -178,9 +177,7 @@ public class WebSocketClientHandshaker00 extends WebSocketClientHandshaker {
      */
     @Override
     protected void verify(FullHttpResponse response) {
-        final HttpResponseStatus status = new HttpResponseStatus(101, "WebSocket Protocol Handshake");
-
-        if (!response.status().equals(status)) {
+        if (!response.status().equals(HttpResponseStatus.SWITCHING_PROTOCOLS)) {
             throw new WebSocketHandshakeException("Invalid handshake response getStatus: " + response.status());
         }
 

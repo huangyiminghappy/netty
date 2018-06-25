@@ -39,6 +39,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
 
     // GZIP related
     private final ByteBufChecksum crc;
+    private final boolean decompressConcatenated;
 
     private enum GzipState {
         HEADER_START,
@@ -63,7 +64,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
      * Creates a new instance with the default wrapper ({@link ZlibWrapper#ZLIB}).
      */
     public JdkZlibDecoder() {
-        this(ZlibWrapper.ZLIB, null);
+        this(ZlibWrapper.ZLIB, null, false);
     }
 
     /**
@@ -72,7 +73,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
      * supports the preset dictionary.
      */
     public JdkZlibDecoder(byte[] dictionary) {
-        this(ZlibWrapper.ZLIB, dictionary);
+        this(ZlibWrapper.ZLIB, dictionary, false);
     }
 
     /**
@@ -81,13 +82,22 @@ public class JdkZlibDecoder extends ZlibDecoder {
      * supported atm.
      */
     public JdkZlibDecoder(ZlibWrapper wrapper) {
-        this(wrapper, null);
+        this(wrapper, null, false);
     }
 
-    private JdkZlibDecoder(ZlibWrapper wrapper, byte[] dictionary) {
+    public JdkZlibDecoder(ZlibWrapper wrapper, boolean decompressConcatenated) {
+        this(wrapper, null, decompressConcatenated);
+    }
+
+    public JdkZlibDecoder(boolean decompressConcatenated) {
+        this(ZlibWrapper.GZIP, null, decompressConcatenated);
+    }
+
+    private JdkZlibDecoder(ZlibWrapper wrapper, byte[] dictionary, boolean decompressConcatenated) {
         if (wrapper == null) {
             throw new NullPointerException("wrapper");
         }
+        this.decompressConcatenated = decompressConcatenated;
         switch (wrapper) {
             case GZIP:
                 inflater = new Inflater(true);
@@ -207,7 +217,13 @@ public class JdkZlibDecoder extends ZlibDecoder {
             if (readFooter) {
                 gzipState = GzipState.FOOTER_START;
                 if (readGZIPFooter(in)) {
-                    finished = true;
+                    finished = !decompressConcatenated;
+
+                    if (!finished) {
+                        inflater.reset();
+                        crc.reset();
+                        gzipState = GzipState.HEADER_START;
+                    }
                 }
             }
         } catch (DataFormatException e) {
@@ -269,6 +285,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                 crc.update(in.readUnsignedByte()); // operating system
 
                 gzipState = GzipState.FLG_READ;
+                // fall through
             case FLG_READ:
                 if ((flags & FEXTRA) != 0) {
                     if (in.readableBytes() < 2) {
@@ -282,6 +299,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     xlen |= xlen1 << 8 | xlen2;
                 }
                 gzipState = GzipState.XLEN_READ;
+                // fall through
             case XLEN_READ:
                 if (xlen != -1) {
                     if (in.readableBytes() < xlen) {
@@ -291,6 +309,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     in.skipBytes(xlen);
                 }
                 gzipState = GzipState.SKIP_FNAME;
+                // fall through
             case SKIP_FNAME:
                 if ((flags & FNAME) != 0) {
                     if (!in.isReadable()) {
@@ -305,6 +324,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     } while (in.isReadable());
                 }
                 gzipState = GzipState.SKIP_COMMENT;
+                // fall through
             case SKIP_COMMENT:
                 if ((flags & FCOMMENT) != 0) {
                     if (!in.isReadable()) {
@@ -319,6 +339,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     } while (in.isReadable());
                 }
                 gzipState = GzipState.PROCESS_FHCRC;
+                // fall through
             case PROCESS_FHCRC:
                 if ((flags & FHCRC) != 0) {
                     if (in.readableBytes() < 4) {
@@ -328,6 +349,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                 }
                 crc.reset();
                 gzipState = GzipState.HEADER_END;
+                // fall through
             case HEADER_END:
                 return true;
             default:

@@ -17,6 +17,7 @@
 package io.netty.handler.ssl;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.internal.tcnative.Buffer;
 import io.netty.internal.tcnative.Library;
@@ -25,6 +26,7 @@ import io.netty.internal.tcnative.SSLContext;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.internal.NativeLibraryLoader;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -32,11 +34,9 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
 import static io.netty.handler.ssl.SslUtils.DEFAULT_CIPHER_SUITES;
@@ -56,8 +56,6 @@ import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1_2;
 public final class OpenSsl {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(OpenSsl.class);
-    private static final String LINUX = "linux";
-    private static final String UNKNOWN = "unknown";
     private static final Throwable UNAVAILABILITY_CAUSE;
 
     static final List<String> DEFAULT_CIPHERS;
@@ -74,45 +72,54 @@ public final class OpenSsl {
     static {
         Throwable cause = null;
 
-        // Test if netty-tcnative is in the classpath first.
-        try {
-            Class.forName("io.netty.internal.tcnative.SSL", false, OpenSsl.class.getClassLoader());
-        } catch (ClassNotFoundException t) {
-            cause = t;
-            logger.debug(
-                    "netty-tcnative not in the classpath; " +
-                    OpenSslEngine.class.getSimpleName() + " will be unavailable.");
-        }
+        if (SystemPropertyUtil.getBoolean("io.netty.handler.ssl.noOpenSsl", false)) {
+            cause = new UnsupportedOperationException(
+                    "OpenSSL was explicit disabled with -Dio.netty.handler.ssl.noOpenSsl=true");
 
-        // If in the classpath, try to load the native library and initialize netty-tcnative.
-        if (cause == null) {
+            logger.debug(
+                    "netty-tcnative explicit disabled; " +
+                            OpenSslEngine.class.getSimpleName() + " will be unavailable.", cause);
+        } else {
+            // Test if netty-tcnative is in the classpath first.
             try {
-                // The JNI library was not already loaded. Load it now.
-                loadTcNative();
-            } catch (Throwable t) {
+                Class.forName("io.netty.internal.tcnative.SSL", false, OpenSsl.class.getClassLoader());
+            } catch (ClassNotFoundException t) {
                 cause = t;
                 logger.debug(
-                    "Failed to load netty-tcnative; " +
-                        OpenSslEngine.class.getSimpleName() + " will be unavailable, unless the " +
-                        "application has already loaded the symbols by some other means. " +
-                        "See http://netty.io/wiki/forked-tomcat-native.html for more information.", t);
+                        "netty-tcnative not in the classpath; " +
+                                OpenSslEngine.class.getSimpleName() + " will be unavailable.");
             }
 
-            try {
-                initializeTcNative();
-
-                // The library was initialized successfully. If loading the library failed above,
-                // reset the cause now since it appears that the library was loaded by some other
-                // means.
-                cause = null;
-            } catch (Throwable t) {
-                if (cause == null) {
+            // If in the classpath, try to load the native library and initialize netty-tcnative.
+            if (cause == null) {
+                try {
+                    // The JNI library was not already loaded. Load it now.
+                    loadTcNative();
+                } catch (Throwable t) {
                     cause = t;
+                    logger.debug(
+                            "Failed to load netty-tcnative; " +
+                                    OpenSslEngine.class.getSimpleName() + " will be unavailable, unless the " +
+                                    "application has already loaded the symbols by some other means. " +
+                                    "See http://netty.io/wiki/forked-tomcat-native.html for more information.", t);
                 }
-                logger.debug(
-                    "Failed to initialize netty-tcnative; " +
-                        OpenSslEngine.class.getSimpleName() + " will be unavailable. " +
-                        "See http://netty.io/wiki/forked-tomcat-native.html for more information.", t);
+
+                try {
+                    initializeTcNative();
+
+                    // The library was initialized successfully. If loading the library failed above,
+                    // reset the cause now since it appears that the library was loaded by some other
+                    // means.
+                    cause = null;
+                } catch (Throwable t) {
+                    if (cause == null) {
+                        cause = t;
+                    }
+                    logger.debug(
+                            "Failed to initialize netty-tcnative; " +
+                                    OpenSslEngine.class.getSimpleName() + " will be unavailable. " +
+                                    "See http://netty.io/wiki/forked-tomcat-native.html for more information.", t);
+                }
             }
         }
 
@@ -150,7 +157,7 @@ public final class OpenSsl {
                         }
                         try {
                             cert = new SelfSignedCertificate();
-                            certBio = ReferenceCountedOpenSslContext.toBIO(cert.cert());
+                            certBio = ReferenceCountedOpenSslContext.toBIO(ByteBufAllocator.DEFAULT, cert.cert());
                             SSL.setCertificateChainBio(ssl, certBio, false);
                             supportsKeyManagerFactory = true;
                             try {
@@ -191,9 +198,9 @@ public final class OpenSsl {
                 availableJavaCipherSuites.add(CipherSuiteConverter.toJava(cipher, "SSL"));
             }
 
+            addIfSupported(availableJavaCipherSuites, defaultCiphers, DEFAULT_CIPHER_SUITES);
             useFallbackCiphersIfDefaultIsEmpty(defaultCiphers, availableJavaCipherSuites);
             DEFAULT_CIPHERS = Collections.unmodifiableList(defaultCiphers);
-            addIfSupported(availableJavaCipherSuites, defaultCiphers, DEFAULT_CIPHER_SUITES);
 
             AVAILABLE_JAVA_CIPHER_SUITES = Collections.unmodifiableSet(availableJavaCipherSuites);
 
@@ -210,19 +217,19 @@ public final class OpenSsl {
             Set<String> protocols = new LinkedHashSet<String>(6);
             // Seems like there is no way to explicitly disable SSLv2Hello in openssl so it is always enabled
             protocols.add(PROTOCOL_SSL_V2_HELLO);
-            if (doesSupportProtocol(SSL.SSL_PROTOCOL_SSLV2)) {
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_SSLV2, SSL.SSL_OP_NO_SSLv2)) {
                 protocols.add(PROTOCOL_SSL_V2);
             }
-            if (doesSupportProtocol(SSL.SSL_PROTOCOL_SSLV3)) {
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_SSLV3, SSL.SSL_OP_NO_SSLv3)) {
                 protocols.add(PROTOCOL_SSL_V3);
             }
-            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1)) {
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1, SSL.SSL_OP_NO_TLSv1)) {
                 protocols.add(PROTOCOL_TLS_V1);
             }
-            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1_1)) {
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1_1, SSL.SSL_OP_NO_TLSv1_1)) {
                 protocols.add(PROTOCOL_TLS_V1_1);
             }
-            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1_2)) {
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1_2, SSL.SSL_OP_NO_TLSv1_2)) {
                 protocols.add(PROTOCOL_TLS_V1_2);
             }
 
@@ -230,7 +237,7 @@ public final class OpenSsl {
             SUPPORTS_OCSP = doesSupportOcsp();
 
             if (logger.isDebugEnabled()) {
-                logger.debug("Supported protocols (OpenSSL): {} ", Arrays.asList(SUPPORTED_PROTOCOLS_SET));
+                logger.debug("Supported protocols (OpenSSL): {} ", SUPPORTED_PROTOCOLS_SET);
                 logger.debug("Default cipher suites (OpenSSL): {}", DEFAULT_CIPHERS);
             }
         } else {
@@ -264,7 +271,11 @@ public final class OpenSsl {
         }
         return supportsOcsp;
     }
-    private static boolean doesSupportProtocol(int protocol) {
+    private static boolean doesSupportProtocol(int protocol, int opt) {
+        if (opt == 0) {
+            // If the opt is 0 the protocol is not supported. This is for example the case with BoringSSL and SSLv2.
+            return false;
+        }
         long sslCtx = -1;
         try {
             sslCtx = SSLContext.make(protocol, SSL.SSL_MODE_COMBINED);
@@ -404,21 +415,21 @@ public final class OpenSsl {
     private OpenSsl() { }
 
     private static void loadTcNative() throws Exception {
-        String os = normalizeOs(SystemPropertyUtil.get("os.name", ""));
-        String arch = normalizeArch(SystemPropertyUtil.get("os.arch", ""));
+        String os = PlatformDependent.normalizedOs();
+        String arch = PlatformDependent.normalizedArch();
 
         Set<String> libNames = new LinkedHashSet<String>(4);
+        String staticLibName = "netty_tcnative";
+
         // First, try loading the platform-specific library. Platform-specific
         // libraries will be available if using a tcnative uber jar.
-        libNames.add("netty-tcnative-" + os + '-' + arch);
-        if (LINUX.equalsIgnoreCase(os)) {
+        libNames.add(staticLibName + "_" + os + '_' + arch);
+        if ("linux".equalsIgnoreCase(os)) {
             // Fedora SSL lib so naming (libssl.so.10 vs libssl.so.1.0.0)..
-            libNames.add("netty-tcnative-" + os + '-' + arch + "-fedora");
+            libNames.add(staticLibName + "_" + os + '_' + arch + "_fedora");
         }
-        // finally the default library.
-        libNames.add("netty-tcnative");
-        // in Java 8, statically compiled JNI code is namespaced
-        libNames.add("netty_tcnative");
+        libNames.add(staticLibName + "_" + arch);
+        libNames.add(staticLibName);
 
         NativeLibraryLoader.loadFirstAvailable(SSL.class.getClassLoader(),
             libNames.toArray(new String[libNames.size()]));
@@ -426,91 +437,6 @@ public final class OpenSsl {
 
     private static boolean initializeTcNative() throws Exception {
         return Library.initialize();
-    }
-
-    private static String normalizeOs(String value) {
-        value = normalize(value);
-        if (value.startsWith("aix")) {
-            return "aix";
-        }
-        if (value.startsWith("hpux")) {
-            return "hpux";
-        }
-        if (value.startsWith("os400")) {
-            // Avoid the names such as os4000
-            if (value.length() <= 5 || !Character.isDigit(value.charAt(5))) {
-                return "os400";
-            }
-        }
-        if (value.startsWith(LINUX)) {
-            return LINUX;
-        }
-        if (value.startsWith("macosx") || value.startsWith("osx")) {
-            return "osx";
-        }
-        if (value.startsWith("freebsd")) {
-            return "freebsd";
-        }
-        if (value.startsWith("openbsd")) {
-            return "openbsd";
-        }
-        if (value.startsWith("netbsd")) {
-            return "netbsd";
-        }
-        if (value.startsWith("solaris") || value.startsWith("sunos")) {
-            return "sunos";
-        }
-        if (value.startsWith("windows")) {
-            return "windows";
-        }
-
-        return UNKNOWN;
-    }
-
-    private static String normalizeArch(String value) {
-        value = normalize(value);
-        if (value.matches("^(x8664|amd64|ia32e|em64t|x64)$")) {
-            return "x86_64";
-        }
-        if (value.matches("^(x8632|x86|i[3-6]86|ia32|x32)$")) {
-            return "x86_32";
-        }
-        if (value.matches("^(ia64|itanium64)$")) {
-            return "itanium_64";
-        }
-        if (value.matches("^(sparc|sparc32)$")) {
-            return "sparc_32";
-        }
-        if (value.matches("^(sparcv9|sparc64)$")) {
-            return "sparc_64";
-        }
-        if (value.matches("^(arm|arm32)$")) {
-            return "arm_32";
-        }
-        if ("aarch64".equals(value)) {
-            return "aarch_64";
-        }
-        if (value.matches("^(ppc|ppc32)$")) {
-            return "ppc_32";
-        }
-        if ("ppc64".equals(value)) {
-            return "ppc_64";
-        }
-        if ("ppc64le".equals(value)) {
-            return "ppcle_64";
-        }
-        if ("s390".equals(value)) {
-            return "s390_32";
-        }
-        if ("s390x".equals(value)) {
-            return "s390_64";
-        }
-
-        return UNKNOWN;
-    }
-
-    private static String normalize(String value) {
-        return value.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "");
     }
 
     static void releaseIfNeeded(ReferenceCounted counted) {

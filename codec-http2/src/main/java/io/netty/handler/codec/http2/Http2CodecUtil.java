@@ -35,6 +35,8 @@ import static io.netty.handler.codec.http2.Http2Exception.headerListSizeError;
 import static io.netty.util.CharsetUtil.UTF_8;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * Constants and utility method used for encoding/decoding HTTP2 frames.
@@ -43,7 +45,7 @@ import static java.lang.Math.min;
 public final class Http2CodecUtil {
     public static final int CONNECTION_STREAM_ID = 0;
     public static final int HTTP_UPGRADE_STREAM_ID = 1;
-    public static final CharSequence HTTP_UPGRADE_SETTINGS_HEADER = new AsciiString("HTTP2-Settings");
+    public static final CharSequence HTTP_UPGRADE_SETTINGS_HEADER = AsciiString.cached("HTTP2-Settings");
     public static final CharSequence HTTP_UPGRADE_PROTOCOL_NAME = "h2c";
     public static final CharSequence TLS_UPGRADE_PROTOCOL_NAME = ApplicationProtocolNames.HTTP_2;
 
@@ -64,9 +66,6 @@ public final class Http2CodecUtil {
 
     private static final ByteBuf CONNECTION_PREFACE =
             unreleasableBuffer(directBuffer(24).writeBytes("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(UTF_8)))
-                    .asReadOnly();
-    private static final ByteBuf EMPTY_PING =
-            unreleasableBuffer(directBuffer(PING_FRAME_PAYLOAD_LENGTH).writeZero(PING_FRAME_PAYLOAD_LENGTH))
                     .asReadOnly();
 
     private static final int MAX_PADDING_LENGTH_LENGTH = 1;
@@ -132,6 +131,8 @@ public final class Http2CodecUtil {
         return maxHeaderListSize + (maxHeaderListSize >>> 2);
     }
 
+    public static final long DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_MILLIS = MILLISECONDS.convert(30, SECONDS);
+
     /**
      * Returns {@code true} if the stream is an outbound stream.
      *
@@ -158,19 +159,11 @@ public final class Http2CodecUtil {
     }
 
     /**
-     * Returns a buffer containing the the {@link #CONNECTION_PREFACE}.
+     * Returns a buffer containing the {@link #CONNECTION_PREFACE}.
      */
     public static ByteBuf connectionPrefaceBuf() {
         // Return a duplicate so that modifications to the reader index will not affect the original buffer.
         return CONNECTION_PREFACE.retainedDuplicate();
-    }
-
-    /**
-     * Returns a buffer filled with all zeros that is the appropriate length for a PING frame.
-     */
-    public static ByteBuf emptyPingBuf() {
-        // Return a duplicate so that modifications to the reader index will not affect the original buffer.
-        return EMPTY_PING.retainedDuplicate();
     }
 
     /**
@@ -219,7 +212,7 @@ public final class Http2CodecUtil {
      * Calculate the amount of bytes that can be sent by {@code state}. The lower bound is {@code 0}.
      */
     public static int streamableBytes(StreamByteDistributor.StreamState state) {
-        return max(0, min(state.pendingBytes(), state.windowSize()));
+        return max(0, (int) min(state.pendingBytes(), state.windowSize()));
     }
 
     /**

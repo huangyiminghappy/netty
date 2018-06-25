@@ -121,6 +121,17 @@ public class MqttCodecTest {
     }
 
     @Test
+    public void testConnectMessageNoPassword() throws Exception {
+        final MqttConnectMessage message = createConnectMessage(MqttVersion.MQTT_3_1_1, null, PASSWORD);
+
+        try {
+            ByteBuf byteBuf = MqttEncoder.doEncode(ALLOCATOR, message);
+        } catch (Exception cause) {
+            assertTrue(cause instanceof DecoderException);
+        }
+    }
+
+    @Test
     public void testConnAckMessage() throws Exception {
         final MqttConnAckMessage message = createConnAckMessage();
         ByteBuf byteBuf = MqttEncoder.doEncode(ALLOCATOR, message);
@@ -201,6 +212,30 @@ public class MqttCodecTest {
         validateFixedHeaders(message.fixedHeader(), decodedMessage.fixedHeader());
         validateMessageIdVariableHeader(message.variableHeader(), decodedMessage.variableHeader());
         validateSubAckPayload(message.payload(), decodedMessage.payload());
+    }
+
+    @Test
+    public void testSubAckMessageWithFailureInPayload() throws Exception {
+        MqttFixedHeader mqttFixedHeader =
+                new MqttFixedHeader(MqttMessageType.SUBACK, false, MqttQoS.AT_MOST_ONCE, false, 0);
+        MqttMessageIdVariableHeader mqttMessageIdVariableHeader = MqttMessageIdVariableHeader.from(12345);
+        MqttSubAckPayload mqttSubAckPayload = new MqttSubAckPayload(MqttQoS.FAILURE.value());
+        MqttSubAckMessage message =
+                new MqttSubAckMessage(mqttFixedHeader, mqttMessageIdVariableHeader, mqttSubAckPayload);
+
+        ByteBuf byteBuf = MqttEncoder.doEncode(ALLOCATOR, message);
+
+        List<Object> out = new LinkedList<Object>();
+        mqttDecoder.decode(ctx, byteBuf, out);
+
+        assertEquals("Expected one object but got " + out.size(), 1, out.size());
+
+        MqttSubAckMessage decodedMessage = (MqttSubAckMessage) out.get(0);
+        validateFixedHeaders(message.fixedHeader(), decodedMessage.fixedHeader());
+        validateMessageIdVariableHeader(message.variableHeader(), decodedMessage.variableHeader());
+        validateSubAckPayload(message.payload(), decodedMessage.payload());
+        assertEquals(1, decodedMessage.payload().grantedQoSLevels().size());
+        assertEquals(MqttQoS.FAILURE, MqttQoS.valueOf(decodedMessage.payload().grantedQoSLevels().get(0)));
     }
 
     @Test
@@ -313,11 +348,15 @@ public class MqttCodecTest {
     }
 
     private static MqttConnectMessage createConnectMessage(MqttVersion mqttVersion) {
+        return createConnectMessage(mqttVersion, USER_NAME, PASSWORD);
+    }
+
+    private static MqttConnectMessage createConnectMessage(MqttVersion mqttVersion, String username, String password) {
         return MqttMessageBuilders.connect()
                 .clientId(CLIENT_ID)
                 .protocolVersion(mqttVersion)
-                .username(USER_NAME)
-                .password(PASSWORD)
+                .username(username)
+                .password(password)
                 .willRetain(true)
                 .willQoS(MqttQoS.AT_LEAST_ONCE)
                 .willFlag(true)

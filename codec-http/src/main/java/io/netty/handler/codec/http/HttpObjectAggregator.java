@@ -30,6 +30,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_LENGTH;
+import static io.netty.handler.codec.http.HttpHeaderNames.EXPECT;
 import static io.netty.handler.codec.http.HttpUtil.getContentLength;
 
 /**
@@ -158,8 +159,7 @@ public class HttpObjectAggregator
         }
     }
 
-    @Override
-    protected Object newContinueResponse(HttpMessage start, int maxContentLength, ChannelPipeline pipeline) {
+    private static Object continueResponse(HttpMessage start, int maxContentLength, ChannelPipeline pipeline) {
         if (HttpUtil.isUnsupportedExpectation(start)) {
             // if the request contains an unsupported expectation, we return 417
             pipeline.fireUserEventTriggered(HttpExpectationFailedEvent.INSTANCE);
@@ -174,6 +174,17 @@ public class HttpObjectAggregator
         }
 
         return null;
+    }
+
+    @Override
+    protected Object newContinueResponse(HttpMessage start, int maxContentLength, ChannelPipeline pipeline) {
+        Object response = continueResponse(start, maxContentLength, pipeline);
+        // we're going to respond based on the request expectation so there's no
+        // need to propagate the expectation further.
+        if (response != null) {
+            start.headers().remove(EXPECT);
+        }
+        return response;
     }
 
     @Override
@@ -413,9 +424,8 @@ public class HttpObjectAggregator
 
         @Override
         public FullHttpRequest replace(ByteBuf content) {
-            DefaultFullHttpRequest dup = new DefaultFullHttpRequest(protocolVersion(), method(), uri(), content);
-            dup.headers().set(headers());
-            dup.trailingHeaders().set(trailingHeaders());
+            DefaultFullHttpRequest dup = new DefaultFullHttpRequest(protocolVersion(), method(), uri(), content,
+                    headers().copy(), trailingHeaders().copy());
             dup.setDecoderResult(decoderResult());
             return dup;
         }
@@ -512,9 +522,8 @@ public class HttpObjectAggregator
 
         @Override
         public FullHttpResponse replace(ByteBuf content) {
-            DefaultFullHttpResponse dup = new DefaultFullHttpResponse(getProtocolVersion(), getStatus(), content);
-            dup.headers().set(headers());
-            dup.trailingHeaders().set(trailingHeaders());
+            DefaultFullHttpResponse dup = new DefaultFullHttpResponse(getProtocolVersion(), getStatus(), content,
+                    headers().copy(), trailingHeaders().copy());
             dup.setDecoderResult(decoderResult());
             return dup;
         }

@@ -23,6 +23,7 @@ import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.FastThreadLocal;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.StringUtil;
+import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -353,6 +354,10 @@ public class DefaultChannelPipeline implements ChannelPipeline {
         ctx.next = newCtx;
     }
 
+    public final ChannelPipeline addFirst(ChannelHandler handler) {
+        return addFirst(null, handler);
+    }
+
     @Override
     public final ChannelPipeline addFirst(ChannelHandler... handlers) {
         return addFirst(null, handlers);
@@ -380,6 +385,10 @@ public class DefaultChannelPipeline implements ChannelPipeline {
         }
 
         return this;
+    }
+
+    public final ChannelPipeline addLast(ChannelHandler handler) {
+        return addLast(null, handler);
     }
 
     @Override
@@ -446,6 +455,26 @@ public class DefaultChannelPipeline implements ChannelPipeline {
     @Override
     public final <T extends ChannelHandler> T remove(Class<T> handlerType) {
         return (T) remove(getContextOrDie(handlerType)).handler();
+    }
+
+    public final <T extends ChannelHandler> T removeIfExists(String name) {
+        return removeIfExists(context(name));
+    }
+
+    public final <T extends ChannelHandler> T removeIfExists(Class<T> handlerType) {
+        return removeIfExists(context(handlerType));
+    }
+
+    public final <T extends ChannelHandler> T removeIfExists(ChannelHandler handler) {
+        return removeIfExists(context(handler));
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T extends ChannelHandler> T removeIfExists(ChannelHandlerContext ctx) {
+        if (ctx == null) {
+            return null;
+        }
+        return (T) remove((AbstractChannelHandlerContext) ctx).handler();
     }
 
     private AbstractChannelHandlerContext remove(final AbstractChannelHandlerContext ctx) {
@@ -602,8 +631,10 @@ public class DefaultChannelPipeline implements ChannelPipeline {
 
     private void callHandlerAdded0(final AbstractChannelHandlerContext ctx) {
         try {
-            ctx.handler().handlerAdded(ctx);
+            // We must call setAddComplete before calling handlerAdded. Otherwise if the handlerAdded method generates
+            // any pipeline events ctx.handler() will miss them because the state will not allow it.
             ctx.setAddComplete();
+            ctx.handler().handlerAdded(ctx);
         } catch (Throwable t) {
             boolean removed = false;
             try {
@@ -1164,6 +1195,20 @@ public class DefaultChannelPipeline implements ChannelPipeline {
     }
 
     /**
+     * Called once the {@link ChannelInboundHandler#channelActive(ChannelHandlerContext)}event hit
+     * the end of the {@link ChannelPipeline}.
+     */
+    protected void onUnhandledInboundChannelActive() {
+    }
+
+    /**
+     * Called once the {@link ChannelInboundHandler#channelInactive(ChannelHandlerContext)} event hit
+     * the end of the {@link ChannelPipeline}.
+     */
+    protected void onUnhandledInboundChannelInactive() {
+    }
+
+    /**
      * Called once a message hit the end of the {@link ChannelPipeline} without been handled by the user
      * in {@link ChannelInboundHandler#channelRead(ChannelHandlerContext, Object)}. This method is responsible
      * to call {@link ReferenceCountUtil#release(Object)} on the given msg at some point.
@@ -1175,6 +1220,47 @@ public class DefaultChannelPipeline implements ChannelPipeline {
                             "Please check your pipeline configuration.", msg);
         } finally {
             ReferenceCountUtil.release(msg);
+        }
+    }
+
+    /**
+     * Called once the {@link ChannelInboundHandler#channelReadComplete(ChannelHandlerContext)} event hit
+     * the end of the {@link ChannelPipeline}.
+     */
+    protected void onUnhandledInboundChannelReadComplete() {
+    }
+
+    /**
+     * Called once an user event hit the end of the {@link ChannelPipeline} without been handled by the user
+     * in {@link ChannelInboundHandler#userEventTriggered(ChannelHandlerContext, Object)}. This method is responsible
+     * to call {@link ReferenceCountUtil#release(Object)} on the given event at some point.
+     */
+    protected void onUnhandledInboundUserEventTriggered(Object evt) {
+        // This may not be a configuration error and so don't log anything.
+        // The event may be superfluous for the current pipeline configuration.
+        ReferenceCountUtil.release(evt);
+    }
+
+    /**
+     * Called once the {@link ChannelInboundHandler#channelWritabilityChanged(ChannelHandlerContext)} event hit
+     * the end of the {@link ChannelPipeline}.
+     */
+    protected void onUnhandledChannelWritabilityChanged() {
+    }
+
+    @UnstableApi
+    protected void incrementPendingOutboundBytes(long size) {
+        ChannelOutboundBuffer buffer = channel.unsafe().outboundBuffer();
+        if (buffer != null) {
+            buffer.incrementPendingOutboundBytes(size);
+        }
+    }
+
+    @UnstableApi
+    protected void decrementPendingOutboundBytes(long size) {
+        ChannelOutboundBuffer buffer = channel.unsafe().outboundBuffer();
+        if (buffer != null) {
+            buffer.decrementPendingOutboundBytes(size);
         }
     }
 
@@ -1198,13 +1284,19 @@ public class DefaultChannelPipeline implements ChannelPipeline {
         public void channelUnregistered(ChannelHandlerContext ctx) throws Exception { }
 
         @Override
-        public void channelActive(ChannelHandlerContext ctx) throws Exception { }
+        public void channelActive(ChannelHandlerContext ctx) throws Exception {
+            onUnhandledInboundChannelActive();
+        }
 
         @Override
-        public void channelInactive(ChannelHandlerContext ctx) throws Exception { }
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            onUnhandledInboundChannelInactive();
+        }
 
         @Override
-        public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception { }
+        public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+            onUnhandledChannelWritabilityChanged();
+        }
 
         @Override
         public void handlerAdded(ChannelHandlerContext ctx) throws Exception { }
@@ -1214,9 +1306,7 @@ public class DefaultChannelPipeline implements ChannelPipeline {
 
         @Override
         public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-            // This may not be a configuration error and so don't log anything.
-            // The event may be superfluous for the current pipeline configuration.
-            ReferenceCountUtil.release(evt);
+            onUnhandledInboundUserEventTriggered(evt);
         }
 
         @Override
@@ -1230,7 +1320,9 @@ public class DefaultChannelPipeline implements ChannelPipeline {
         }
 
         @Override
-        public void channelReadComplete(ChannelHandlerContext ctx) throws Exception { }
+        public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+            onUnhandledInboundChannelReadComplete();
+        }
     }
 
     final class HeadContext extends AbstractChannelHandlerContext

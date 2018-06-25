@@ -246,7 +246,7 @@ final class FixedCompositeByteBuf extends AbstractReferenceCountedByteBuf {
             readable += b.readableBytes();
             if (index < readable) {
                 if (isBuffer) {
-                    // Create a new component ad store ti in the array so it not create a new object
+                    // Create a new component and store it in the array so it not create a new object
                     // on the next access.
                     comp = new Component(i, readable - b.readableBytes(), b);
                     buffers[i] = comp;
@@ -612,27 +612,62 @@ final class FixedCompositeByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public boolean hasArray() {
-        return false;
+        switch (buffers.length) {
+            case 0:
+                return true;
+            case 1:
+                return buffer(0).hasArray();
+            default:
+                return false;
+        }
     }
 
     @Override
     public byte[] array() {
-        throw new UnsupportedOperationException();
+        switch (buffers.length) {
+            case 0:
+                return EmptyArrays.EMPTY_BYTES;
+            case 1:
+                return buffer(0).array();
+            default:
+                throw new UnsupportedOperationException();
+        }
     }
 
     @Override
     public int arrayOffset() {
-        throw new UnsupportedOperationException();
+        switch (buffers.length) {
+            case 0:
+                return 0;
+            case 1:
+                return buffer(0).arrayOffset();
+            default:
+                throw new UnsupportedOperationException();
+        }
     }
 
     @Override
     public boolean hasMemoryAddress() {
-        return false;
+        switch (buffers.length) {
+            case 0:
+                return Unpooled.EMPTY_BUFFER.hasMemoryAddress();
+            case 1:
+                return buffer(0).hasMemoryAddress();
+            default:
+                return false;
+        }
     }
 
     @Override
     public long memoryAddress() {
-        throw new UnsupportedOperationException();
+        switch (buffers.length) {
+            case 0:
+                return Unpooled.EMPTY_BUFFER.memoryAddress();
+            case 1:
+                return buffer(0).memoryAddress();
+            default:
+                throw new UnsupportedOperationException();
+        }
     }
 
     @Override

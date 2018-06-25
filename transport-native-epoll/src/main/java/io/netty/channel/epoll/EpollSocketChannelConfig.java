@@ -51,6 +51,7 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
         if (PlatformDependent.canEnableTcpNoDelayByDefault()) {
             setTcpNoDelay(true);
         }
+        calculateMaxBytesPerGatheringWrite();
     }
 
     @Override
@@ -60,7 +61,8 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
                 SO_RCVBUF, SO_SNDBUF, TCP_NODELAY, SO_KEEPALIVE, SO_REUSEADDR, SO_LINGER, IP_TOS,
                 ALLOW_HALF_CLOSURE, EpollChannelOption.TCP_CORK, EpollChannelOption.TCP_NOTSENT_LOWAT,
                 EpollChannelOption.TCP_KEEPCNT, EpollChannelOption.TCP_KEEPIDLE, EpollChannelOption.TCP_KEEPINTVL,
-                EpollChannelOption.TCP_MD5SIG, EpollChannelOption.TCP_QUICKACK);
+                EpollChannelOption.TCP_MD5SIG, EpollChannelOption.TCP_QUICKACK, EpollChannelOption.IP_TRANSPARENT,
+                EpollChannelOption.TCP_FASTOPEN_CONNECT);
     }
 
     @SuppressWarnings("unchecked")
@@ -111,6 +113,12 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
         if (option == EpollChannelOption.TCP_QUICKACK) {
             return (T) Boolean.valueOf(isTcpQuickAck());
         }
+        if (option == EpollChannelOption.IP_TRANSPARENT) {
+            return (T) Boolean.valueOf(isIpTransparent());
+        }
+        if (option == EpollChannelOption.TCP_FASTOPEN_CONNECT) {
+            return (T) Boolean.valueOf(isTcpFastOpenConnect());
+        }
         return super.getOption(option);
     }
 
@@ -146,12 +154,16 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
             setTcpKeepIntvl((Integer) value);
         } else if (option == EpollChannelOption.TCP_USER_TIMEOUT) {
             setTcpUserTimeout((Integer) value);
+        } else if (option == EpollChannelOption.IP_TRANSPARENT) {
+            setIpTransparent((Boolean) value);
         } else if (option == EpollChannelOption.TCP_MD5SIG) {
             @SuppressWarnings("unchecked")
             final Map<InetAddress, byte[]> m = (Map<InetAddress, byte[]>) value;
             setTcpMd5Sig(m);
         } else if (option == EpollChannelOption.TCP_QUICKACK) {
             setTcpQuickAck((Boolean) value);
+        } else if (option == EpollChannelOption.TCP_FASTOPEN_CONNECT) {
+            setTcpFastOpenConnect((Boolean) value);
         } else {
             return super.setOption(option, value);
         }
@@ -329,6 +341,7 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
     public EpollSocketChannelConfig setSendBufferSize(int sendBufferSize) {
         try {
             channel.socket.setSendBufferSize(sendBufferSize);
+            calculateMaxBytesPerGatheringWrite();
             return this;
         } catch (IOException e) {
             throw new ChannelException(e);
@@ -446,6 +459,31 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
         }
     }
 
+     /**
+     * Returns {@code true} if <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_TRANSPARENT</a> is enabled,
+     * {@code false} otherwise.
+     */
+    public boolean isIpTransparent() {
+        try {
+            return channel.socket.isIpTransparent();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * If {@code true} is used <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_TRANSPARENT</a> is enabled,
+     * {@code false} for disable it. Default is disabled.
+     */
+    public EpollSocketChannelConfig setIpTransparent(boolean transparent) {
+        try {
+            channel.socket.setIpTransparent(transparent);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
     /**
      * Set the {@code TCP_MD5SIG} option on the socket. See {@code linux/tcp.h} for more details.
      * Keys can only be set on, not read to prevent a potential leak, as they are confidential.
@@ -480,6 +518,32 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
     public boolean isTcpQuickAck() {
         try {
             return channel.socket.isTcpQuickAck();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Set the {@code TCP_FASTOPEN_CONNECT} option on the socket. Requires Linux kernel 4.11 or later.
+     * See
+     * <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=19f6d3f3">this commit</a>
+     * for more details.
+     */
+    public EpollSocketChannelConfig setTcpFastOpenConnect(boolean fastOpenConnect) {
+        try {
+            channel.socket.setTcpFastOpenConnect(fastOpenConnect);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Returns {@code true} if {@code TCP_FASTOPEN_CONNECT} is enabled, {@code false} otherwise.
+     */
+    public boolean isTcpFastOpenConnect() {
+        try {
+            return channel.socket.isTcpFastOpenConnect();
         } catch (IOException e) {
             throw new ChannelException(e);
         }
@@ -569,5 +633,13 @@ public final class EpollSocketChannelConfig extends EpollChannelConfig implement
     public EpollSocketChannelConfig setEpollMode(EpollMode mode) {
         super.setEpollMode(mode);
         return this;
+    }
+
+    private void calculateMaxBytesPerGatheringWrite() {
+        // Multiply by 2 to give some extra space in case the OS can process write data faster than we can provide.
+        int newSendBufferSize = getSendBufferSize() << 1;
+        if (newSendBufferSize > 0) {
+            setMaxBytesPerGatheringWrite(getSendBufferSize() << 1);
+        }
     }
 }

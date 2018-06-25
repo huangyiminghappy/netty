@@ -60,9 +60,9 @@ import static io.netty.handler.codec.http2.Http2CodecUtil.getEmbeddedHttp2Except
 import static io.netty.handler.codec.http2.Http2Exception.isStreamError;
 import static io.netty.handler.codec.http2.Http2TestUtil.of;
 import static io.netty.handler.codec.http2.Http2TestUtil.runInChannel;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -498,7 +498,12 @@ public class InboundHttp2ToHttpAdapterTest {
             assertEquals(request, capturedRequests.get(0));
 
             final Http2Headers http2Headers = new DefaultHttp2Headers().status(new AsciiString("200"));
-            final Http2Headers http2Headers2 = new DefaultHttp2Headers().status(new AsciiString("201"))
+            // The PUSH_PROMISE frame includes a header block that contains a
+            // complete set of request header fields that the server attributes to
+            // the request.
+            // https://tools.ietf.org/html/rfc7540#section-8.2.1
+            // Therefore, we should consider the case where there is no Http response status.
+            final Http2Headers http2Headers2 = new DefaultHttp2Headers()
                     .scheme(new AsciiString("https"))
                     .authority(new AsciiString("example.org"));
             runInChannel(serverConnectedChannel, new Http2Runnable() {
@@ -603,6 +608,9 @@ public class InboundHttp2ToHttpAdapterTest {
             verify(serverListener, times(2)).messageReceived(requestCaptor.capture());
             capturedRequests = requestCaptor.getAllValues();
             assertEquals(2, capturedRequests.size());
+            // We do not expect to have this header in the captured request so remove it now.
+            assertNotNull(request.headers().remove("x-http2-stream-weight"));
+
             assertEquals(request, capturedRequests.get(0));
             assertEquals(request2, capturedRequests.get(1));
 
@@ -720,7 +728,7 @@ public class InboundHttp2ToHttpAdapterTest {
                 });
                 p.addLast(new ChannelInboundHandlerAdapter() {
                     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-                        if (evt instanceof Http2ConnectionPrefaceWrittenEvent) {
+                        if (evt == Http2ConnectionPrefaceAndSettingsFrameWrittenEvent.INSTANCE) {
                             prefaceWrittenLatch.countDown();
                             ctx.pipeline().remove(this);
                         }

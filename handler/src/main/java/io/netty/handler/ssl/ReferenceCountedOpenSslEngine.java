@@ -58,15 +58,18 @@ import javax.net.ssl.SSLSessionContext;
 import javax.security.cert.X509Certificate;
 
 import static io.netty.handler.ssl.OpenSsl.memoryAddress;
-import static io.netty.util.internal.EmptyArrays.EMPTY_CERTIFICATES;
-import static io.netty.util.internal.EmptyArrays.EMPTY_JAVAX_X509_CERTIFICATES;
-import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static io.netty.handler.ssl.SslUtils.PROTOCOL_SSL_V2;
 import static io.netty.handler.ssl.SslUtils.PROTOCOL_SSL_V2_HELLO;
 import static io.netty.handler.ssl.SslUtils.PROTOCOL_SSL_V3;
 import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1;
 import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1_1;
 import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1_2;
+import static io.netty.handler.ssl.SslUtils.SSL_RECORD_HEADER_LENGTH;
+import static io.netty.internal.tcnative.SSL.SSL_MAX_PLAINTEXT_LENGTH;
+import static io.netty.internal.tcnative.SSL.SSL_MAX_RECORD_LENGTH;
+import static io.netty.util.internal.EmptyArrays.EMPTY_CERTIFICATES;
+import static io.netty.util.internal.EmptyArrays.EMPTY_JAVAX_X509_CERTIFICATES;
+import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static java.lang.Integer.MAX_VALUE;
 import static java.lang.Math.min;
 import static javax.net.ssl.SSLEngineResult.HandshakeStatus.FINISHED;
@@ -87,7 +90,7 @@ import static javax.net.ssl.SSLEngineResult.Status.OK;
  * the instance depends upon are released. Otherwise if any method of this class is called which uses the
  * the {@link ReferenceCountedOpenSslContext} JNI resources the JVM may crash.
  */
-public class ReferenceCountedOpenSslEngine extends SSLEngine implements ReferenceCounted {
+public class ReferenceCountedOpenSslEngine extends SSLEngine implements ReferenceCounted, ApplicationProtocolAccessor {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ReferenceCountedOpenSslEngine.class);
 
@@ -119,7 +122,11 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     /**
      * Depends upon tcnative ... only use if tcnative is available!
      */
-    static final int MAX_PLAINTEXT_LENGTH = SSL.SSL_MAX_PLAINTEXT_LENGTH;
+    static final int MAX_PLAINTEXT_LENGTH = SSL_MAX_PLAINTEXT_LENGTH;
+    /**
+     * Depends upon tcnative ... only use if tcnative is available!
+     */
+    private static final int MAX_RECORD_SIZE = SSL_MAX_RECORD_LENGTH;
 
     private static final AtomicIntegerFieldUpdater<ReferenceCountedOpenSslEngine> DESTROYED_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(ReferenceCountedOpenSslEngine.class, "destroyed");
@@ -156,9 +163,9 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     }
 
     private HandshakeState handshakeState = HandshakeState.NOT_STARTED;
-    private boolean renegotiationPending;
     private boolean receivedShutdown;
     private volatile int destroyed;
+    private volatile String applicationProtocol;
 
     // Reference Counting
     private final ResourceLeakTracker<ReferenceCountedOpenSslEngine> leak;
@@ -200,12 +207,11 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     private boolean isInboundDone;
     private boolean outboundClosed;
 
-    private final boolean jdkCompatibilityMode;
+    final boolean jdkCompatibilityMode;
     private final boolean clientMode;
-    private final ByteBufAllocator alloc;
+    final ByteBufAllocator alloc;
     private final OpenSslEngineMap engineMap;
     private final OpenSslApplicationProtocolNegotiator apn;
-    private final boolean rejectRemoteInitiatedRenegotiation;
     private final OpenSslSession session;
     private final Certificate[] localCerts;
     private final ByteBuffer[] singleSrcBuffer = new ByteBuffer[1];
@@ -240,7 +246,6 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         session = new OpenSslSession(context.sessionContext());
         clientMode = context.isClient();
         engineMap = context.engineMap;
-        rejectRemoteInitiatedRenegotiation = context.getRejectRemoteInitiatedRenegotiation();
         localCerts = context.keyCertChain;
         keyMaterialManager = context.keyMaterialManager();
         enableOcsp = context.enableOcsp;
@@ -287,6 +292,9 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                 PlatformDependent.throwException(cause);
             }
         }
+
+        // Only create the leak after everything else was executed and so ensure we don't produce a false-positive for
+        // the ResourceLeakDetector.
         leak = leakDetection ? leakDetector.track(this) : null;
     }
 
@@ -416,7 +424,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         final int sslWrote;
 
         if (src.isDirect()) {
-            sslWrote = SSL.writeToSSL(ssl, Buffer.address(src) + pos, len);
+            sslWrote = SSL.writeToSSL(ssl, bufferAddress(src) + pos, len);
             if (sslWrote > 0) {
                 src.position(pos + sslWrote);
             }
@@ -447,7 +455,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     private ByteBuf writeEncryptedData(final ByteBuffer src, int len) {
         final int pos = src.position();
         if (src.isDirect()) {
-            SSL.bioSetByteBuffer(networkBIO, Buffer.address(src) + pos, len, false);
+            SSL.bioSetByteBuffer(networkBIO, bufferAddress(src) + pos, len, false);
         } else {
             final ByteBuf buf = alloc.directBuffer(len);
             try {
@@ -475,7 +483,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         final int sslRead;
         final int pos = dst.position();
         if (dst.isDirect()) {
-            sslRead = SSL.readFromSSL(ssl, Buffer.address(dst) + pos, dst.limit() - pos);
+            sslRead = SSL.readFromSSL(ssl, bufferAddress(dst) + pos, dst.limit() - pos);
             if (sslRead > 0) {
                 dst.position(pos + sslRead);
             }
@@ -589,7 +597,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             try {
                 // Setup the BIO buffer so that we directly write the encryption results into dst.
                 if (dst.isDirect()) {
-                    SSL.bioSetByteBuffer(networkBIO, Buffer.address(dst) + dst.position(), dst.remaining(),
+                    SSL.bioSetByteBuffer(networkBIO, bufferAddress(dst) + dst.position(), dst.remaining(),
                             true);
                 } else {
                     bioReadCopyBuf = alloc.directBuffer(dst.remaining());
@@ -599,8 +607,17 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
 
                 int bioLengthBefore = SSL.bioLengthByteBuffer(networkBIO);
 
-                // Explicit use outboundClosed as we want to drain any bytes that are still present.
+                // Explicitly use outboundClosed as we want to drain any bytes that are still present.
                 if (outboundClosed) {
+                    // If the outbound was closed we want to ensure we can produce the alert to the destination buffer.
+                    // This is true even if we not using jdkCompatibilityMode.
+                    //
+                    // We use a plaintextLength of 2 as we at least want to have an alert fit into it.
+                    // https://tools.ietf.org/html/rfc5246#section-7.2
+                    if (!isBytesAvailableEnoughForWrap(dst.remaining(), 2, 1)) {
+                        return new SSLEngineResult(BUFFER_OVERFLOW, getHandshakeStatus(), 0, 0);
+                    }
+
                     // There is something left to drain.
                     // See https://github.com/netty/netty/issues/6260
                     bytesProduced = SSL.bioFlushByteBuffer(networkBIO);
@@ -642,17 +659,6 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                     }
 
                     status = handshake();
-
-                    if (renegotiationPending && status == FINISHED) {
-                        // If renegotiationPending is true that means when we attempted to start renegotiation
-                        // the BIO buffer didn't have enough space to hold the HelloRequest which prompts the
-                        // client to initiate a renegotiation. At this point the HelloRequest has been written
-                        // so we can actually start the handshake process.
-                        renegotiationPending = false;
-                        SSL.setState(ssl, SSL.SSL_ST_ACCEPT);
-                        handshakeState = HandshakeState.STARTED_EXPLICITLY;
-                        status = handshake();
-                    }
 
                     // Handshake may have generated more data, for example if the internal SSL buffer is small
                     // we may have freed up space by flushing above.
@@ -940,7 +946,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             // are multiple records or partial records this may reduce thrashing events through the pipeline.
             // [1] https://docs.oracle.com/javase/7/docs/api/javax/net/ssl/SSLEngine.html
             if (jdkCompatibilityMode) {
-                if (len < SslUtils.SSL_RECORD_HEADER_LENGTH) {
+                if (len < SSL_RECORD_HEADER_LENGTH) {
                     return newResultMayFinishHandshake(BUFFER_UNDERFLOW, status, 0, 0);
                 }
 
@@ -949,15 +955,27 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                     throw new NotSslRecordException("not an SSL/TLS record");
                 }
 
-                if (packetLength - SslUtils.SSL_RECORD_HEADER_LENGTH > capacity) {
-                    // No enough space in the destination buffer so signal the caller
-                    // that the buffer needs to be increased.
+                final int packetLengthDataOnly = packetLength - SSL_RECORD_HEADER_LENGTH;
+                if (packetLengthDataOnly > capacity) {
+                    // Not enough space in the destination buffer so signal the caller that the buffer needs to be
+                    // increased.
+                    if (packetLengthDataOnly > MAX_RECORD_SIZE) {
+                        // The packet length MUST NOT exceed 2^14 [1]. However we do accommodate more data to support
+                        // legacy use cases which may violate this condition (e.g. OpenJDK's SslEngineImpl). If the max
+                        // length is exceeded we fail fast here to avoid an infinite loop due to the fact that we
+                        // won't allocate a buffer large enough.
+                        // [1] https://tools.ietf.org/html/rfc5246#section-6.2.1
+                        throw new SSLException("Illegal packet length: " + packetLengthDataOnly + " > " +
+                                                session.getApplicationBufferSize());
+                    } else {
+                        session.tryExpandApplicationBufferSize(packetLengthDataOnly);
+                    }
                     return newResultMayFinishHandshake(BUFFER_OVERFLOW, status, 0, 0);
                 }
 
                 if (len < packetLength) {
-                    // We either have no enough data to read the packet length at all or not enough for reading
-                    // the whole packet.
+                    // We either don't have enough data to read the packet length or not enough for reading the whole
+                    // packet.
                     return newResultMayFinishHandshake(BUFFER_UNDERFLOW, status, 0, 0);
                 }
             } else if (len == 0 && sslPending <= 0) {
@@ -1014,10 +1032,9 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                             }
 
                             int bytesRead = readPlaintextData(dst);
-                            // We are directly using the ByteBuffer memory for the write, and so we only know what
-                            // has been consumed after we let SSL decrypt the data. At this point we should update
-                            // the number of bytes consumed, update the ByteBuffer position, and release temp
-                            // ByteBuf.
+                            // We are directly using the ByteBuffer memory for the write, and so we only know what has
+                            // been consumed after we let SSL decrypt the data. At this point we should update the
+                            // number of bytes consumed, update the ByteBuffer position, and release temp ByteBuf.
                             int localBytesConsumed = pendingEncryptedBytes - SSL.bioLengthByteBuffer(networkBIO);
                             bytesConsumed += localBytesConsumed;
                             packetLength -= localBytesConsumed;
@@ -1036,12 +1053,10 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                                                 newResultMayFinishHandshake(isInboundDone() ? CLOSED : OK, status,
                                                                             bytesConsumed, bytesProduced);
                                     }
-                                } else if (packetLength == 0) {
-                                    // We read everything return now.
+                                } else if (packetLength == 0 || jdkCompatibilityMode) {
+                                    // We either consumed all data or we are in jdkCompatibilityMode and have consumed
+                                    // a single TLS packet and should stop consuming until this method is called again.
                                     break srcLoop;
-                                } else if (jdkCompatibilityMode) {
-                                    // try to write again to the BIO. stop reading from it by break out of the readLoop.
-                                    break;
                                 }
                             } else {
                                 int sslError = SSL.getError(ssl, bytesRead);
@@ -1087,8 +1102,6 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     }
 
     private SSLEngineResult sslReadErrorResult(int err, int bytesConsumed, int bytesProduced) throws SSLException {
-        String errStr = SSL.getErrorString(err);
-
         // Check if we have a pending handshakeException and if so see if we need to consume all pending data from the
         // BIO first or can just shutdown and throw it now.
         // This is needed so we ensure close_notify etc is correctly send to the remote peer.
@@ -1097,11 +1110,14 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             if (handshakeException == null && handshakeState != HandshakeState.FINISHED) {
                 // we seems to have data left that needs to be transfered and so the user needs
                 // call wrap(...). Store the error so we can pick it up later.
-                handshakeException = new SSLHandshakeException(errStr);
+                handshakeException = new SSLHandshakeException(SSL.getErrorString(err));
             }
+            // We need to clear all errors so we not pick up anything that was left on the stack on the next
+            // operation. Note that shutdownWithError(...) will cleanup the stack as well so its only needed here.
+            SSL.clearError();
             return new SSLEngineResult(OK, NEED_WRAP, bytesConsumed, bytesProduced);
         }
-        throw shutdownWithError("SSL_read", errStr);
+        throw shutdownWithError("SSL_read", SSL.getErrorString(err));
     }
 
     private void closeAll() throws SSLException {
@@ -1111,7 +1127,10 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     }
 
     private void rejectRemoteInitiatedRenegotiation() throws SSLHandshakeException {
-        if (rejectRemoteInitiatedRenegotiation && SSL.getHandshakeCount(ssl) > 1) {
+        // As rejectRemoteInitiatedRenegotiation() is called in a finally block we also need to check if we shutdown
+        // the engine before as otherwise SSL.getHandshakeCount(ssl) will throw an NPE if the passed in ssl is 0.
+        // See https://github.com/netty/netty/issues/7353
+        if (!isDestroyed() && SSL.getHandshakeCount(ssl) > 1) {
             // TODO: In future versions me may also want to send a fatal_alert to the client and so notify it
             // that the renegotiation failed.
             shutdown();
@@ -1487,43 +1506,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                 // Nothing to do as the handshake is not done yet.
                 break;
             case FINISHED:
-                if (clientMode) {
-                    // Only supported for server mode at the moment.
-                    throw RENEGOTIATION_UNSUPPORTED;
-                }
-                // For renegotiate on the server side we need to issue the following command sequence with openssl:
-                //
-                // SSL_renegotiate(ssl)
-                // SSL_do_handshake(ssl)
-                // ssl->state = SSL_ST_ACCEPT
-                // SSL_do_handshake(ssl)
-                //
-                // Because of this we fall-through to call handshake() after setting the state, as this will also take
-                // care of updating the internal OpenSslSession object.
-                //
-                // See also:
-                // https://github.com/apache/httpd/blob/2.4.16/modules/ssl/ssl_engine_kernel.c#L812
-                // http://h71000.www7.hp.com/doc/83final/ba554_90007/ch04s03.html
-                int status;
-                if ((status = SSL.renegotiate(ssl)) != 1 || (status = SSL.doHandshake(ssl)) != 1) {
-                    int err = SSL.getError(ssl, status);
-                    if (err == SSL.SSL_ERROR_WANT_READ || err == SSL.SSL_ERROR_WANT_WRITE) {
-                        // If the internal SSL buffer is small it is possible that doHandshake may "fail" because
-                        // there is not enough room to write, so we should wait until the renegotiation has been.
-                        renegotiationPending = true;
-                        handshakeState = HandshakeState.STARTED_EXPLICITLY;
-                        lastAccessed = System.currentTimeMillis();
-                        return;
-                    } else {
-                        throw shutdownWithError("renegotiation failed");
-                    }
-                }
-
-                SSL.setState(ssl, SSL.SSL_ST_ACCEPT);
-
-                lastAccessed = System.currentTimeMillis();
-
-                // fall-through
+                throw RENEGOTIATION_UNSUPPORTED;
             case NOT_STARTED:
                 handshakeState = HandshakeState.STARTED_EXPLICITLY;
                 handshake();
@@ -1584,7 +1567,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
 
         if (!certificateSet && keyMaterialManager != null) {
             certificateSet = true;
-            keyMaterialManager.setKeyMaterial(this);
+            keyMaterialManager.setKeyMaterialServerSide(this);
         }
 
         int code = SSL.doHandshake(ssl);
@@ -1824,7 +1807,20 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         return Java8SslUtils.checkSniHostnameMatch(matchers, hostname);
     }
 
-    private final class OpenSslSession implements SSLSession, ApplicationProtocolAccessor {
+    @Override
+    public String getNegotiatedApplicationProtocol() {
+        return applicationProtocol;
+    }
+
+    private static long bufferAddress(ByteBuffer b) {
+        assert b.isDirect();
+        if (PlatformDependent.hasUnsafe()) {
+            return PlatformDependent.directBufferAddress(b);
+        }
+        return Buffer.address(b);
+    }
+
+    private final class OpenSslSession implements SSLSession {
         private final OpenSslSessionContext sessionContext;
 
         // These are guarded by synchronized(OpenSslEngine.this) as handshakeFinished() may be triggered by any
@@ -1832,10 +1828,10 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         private X509Certificate[] x509PeerCerts;
         private Certificate[] peerCerts;
         private String protocol;
-        private String applicationProtocol;
         private String cipher;
         private byte[] id;
         private long creationTime;
+        private volatile int applicationBufferSize = MAX_PLAINTEXT_LENGTH;
 
         // lazy init for memory reasons
         private Map<String, Object> values;
@@ -2040,14 +2036,14 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                 case ALPN:
                     applicationProtocol = SSL.getAlpnSelected(ssl);
                     if (applicationProtocol != null) {
-                        this.applicationProtocol = selectApplicationProtocol(
+                        ReferenceCountedOpenSslEngine.this.applicationProtocol = selectApplicationProtocol(
                                 protocols, behavior, applicationProtocol);
                     }
                     break;
                 case NPN:
                     applicationProtocol = SSL.getNextProtoNegotiated(ssl);
                     if (applicationProtocol != null) {
-                        this.applicationProtocol = selectApplicationProtocol(
+                        ReferenceCountedOpenSslEngine.this.applicationProtocol = selectApplicationProtocol(
                                 protocols, behavior, applicationProtocol);
                     }
                     break;
@@ -2057,7 +2053,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                         applicationProtocol = SSL.getNextProtoNegotiated(ssl);
                     }
                     if (applicationProtocol != null) {
-                        this.applicationProtocol = selectApplicationProtocol(
+                        ReferenceCountedOpenSslEngine.this.applicationProtocol = selectApplicationProtocol(
                                 protocols, behavior, applicationProtocol);
                     }
                     break;
@@ -2157,13 +2153,6 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
         }
 
         @Override
-        public String getApplicationProtocol() {
-            synchronized (ReferenceCountedOpenSslEngine.this) {
-                return applicationProtocol;
-            }
-        }
-
-        @Override
         public String getPeerHost() {
             return ReferenceCountedOpenSslEngine.this.getPeerHost();
         }
@@ -2180,7 +2169,19 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
 
         @Override
         public int getApplicationBufferSize() {
-            return MAX_PLAINTEXT_LENGTH;
+            return applicationBufferSize;
+        }
+
+        /**
+         * Expand (or increase) the value returned by {@link #getApplicationBufferSize()} if necessary.
+         * <p>
+         * This is only called in a synchronized block, so no need to use atomic operations.
+         * @param packetLengthDataOnly The packet size which exceeds the current {@link #getApplicationBufferSize()}.
+         */
+        void tryExpandApplicationBufferSize(int packetLengthDataOnly) {
+            if (packetLengthDataOnly > MAX_PLAINTEXT_LENGTH && applicationBufferSize != MAX_RECORD_SIZE) {
+                applicationBufferSize = MAX_RECORD_SIZE;
+            }
         }
     }
 }

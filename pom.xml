@@ -26,7 +26,7 @@
   <groupId>io.netty</groupId>
   <artifactId>netty-parent</artifactId>
   <packaging>pom</packaging>
-  <version>4.1.14.Final-SNAPSHOT</version>
+  <version>4.1.26.Final-SNAPSHOT</version>
 
   <name>Netty</name>
   <url>http://netty.io/</url>
@@ -68,6 +68,40 @@
   </developers>
 
   <profiles>
+    <!-- JDK11 -->
+    <profile>
+      <id>java11</id>
+      <activation>
+        <jdk>11</jdk>
+      </activation>
+      <properties>
+        <!-- Not use alpn agent as Java11 supports alpn out of the box -->
+        <argLine.alpnAgent />
+        <forbiddenapis.skip>true</forbiddenapis.skip>
+        <!-- Needed because of https://issues.apache.org/jira/browse/MENFORCER-275 -->
+        <enforcer.plugin.version>3.0.0-M1</enforcer.plugin.version>
+        <!-- 1.4.x does not work in Java10+ -->
+        <jboss.marshalling.version>2.0.5.Final</jboss.marshalling.version>
+      </properties>
+    </profile>
+
+    <!-- JDK10 -->
+    <profile>
+      <id>java10</id>
+      <activation>
+        <jdk>10</jdk>
+      </activation>
+      <properties>
+        <!-- Not use alpn agent as Java10 supports alpn out of the box -->
+        <argLine.alpnAgent />
+        <forbiddenapis.skip>true</forbiddenapis.skip>
+        <!-- Needed because of https://issues.apache.org/jira/browse/MENFORCER-275 -->
+        <enforcer.plugin.version>3.0.0-M1</enforcer.plugin.version>
+        <!-- 1.4.x does not work in Java10+ -->
+        <jboss.marshalling.version>2.0.5.Final</jboss.marshalling.version>
+      </properties>
+    </profile>
+
     <!-- JDK9 -->
     <profile>
       <id>java9</id>
@@ -77,13 +111,10 @@
         <argLine.java9>--add-modules java.xml.bind ${argLine.java9.extras}</argLine.java9>
         <!-- Not use alpn agent as Java9 supports alpn out of the box -->
         <argLine.alpnAgent />
-        <!-- This is needed as earlier ASM versions not support java9 -->
-        <!-- https://issues.apache.org/jira/browse/MSHADE-242 -->
-        <!-- https://github.com/netty/netty/issues/6100 -->
-        <asm.version>6.0_ALPHA</asm.version>
         <!-- Skip as maven plugin not works with Java9 yet --> 
-        <skipOsgiTestsuite>true</skipOsgiTestsuite>
         <forbiddenapis.skip>true</forbiddenapis.skip>
+        <!-- Needed because of https://issues.apache.org/jira/browse/MENFORCER-275 -->
+        <enforcer.plugin.version>3.0.0-M1</enforcer.plugin.version>
       </properties>
       <activation>
         <jdk>9</jdk>
@@ -94,6 +125,12 @@
       <id>leak</id>
       <properties>
         <argLine.leak>-Dio.netty.leakDetectionLevel=paranoid -Dio.netty.leakDetection.maxRecords=32</argLine.leak>
+      </properties>
+    </profile>
+    <profile>
+      <id>noPrintGC</id>
+      <properties>
+        <argLine.printGC>-D_</argLine.printGC>
       </properties>
     </profile>
     <profile>
@@ -165,16 +202,11 @@
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <netty.build.version>22</netty.build.version>
     <jboss.marshalling.version>1.4.11.Final</jboss.marshalling.version>
-    <jetty.alpnAgent.version>2.0.6</jetty.alpnAgent.version>
+    <jetty.alpnAgent.version>2.0.7</jetty.alpnAgent.version>
     <jetty.alpnAgent.path>"${settings.localRepository}"/org/mortbay/jetty/alpn/jetty-alpn-agent/${jetty.alpnAgent.version}/jetty-alpn-agent-${jetty.alpnAgent.version}.jar</jetty.alpnAgent.path>
     <argLine.common>
       -server
       -dsa -da -ea:io.netty...
-      -XX:+AggressiveOpts
-      -XX:+TieredCompilation
-      -XX:+UseBiasedLocking
-      -XX:+UseFastAccessorMethods
-      -XX:+OptimizeStringConcat
       -XX:+HeapDumpOnOutOfMemoryError
     </argLine.common>
     <!-- Default to ALPN. See forcenpn profile to force NPN -->
@@ -182,26 +214,28 @@
     <argLine.leak>-D_</argLine.leak> <!-- Overridden when 'leak' profile is active -->
     <argLine.noUnsafe>-D_</argLine.noUnsafe> <!-- Overridden when 'noUnsafe' profile is active -->
     <argLine.coverage>-D_</argLine.coverage> <!-- Overridden when 'coverage' profile is active -->
+    <argLine.printGC>-XX:+PrintGCDetails</argLine.printGC>
     <argLine.java9 /> <!-- Overridden when 'java9' profile is active -->
     <argLine.javaProperties>-D_</argLine.javaProperties>
     <!-- Configure the os-maven-plugin extension to expand the classifier on                  -->
     <!-- Fedora-"like" systems. This is currently only used for the netty-tcnative dependency -->
     <os.detection.classifierWithLikes>fedora</os.detection.classifierWithLikes>
     <tcnative.artifactId>netty-tcnative</tcnative.artifactId>
-    <tcnative.version>2.0.5.Final</tcnative.version>
+    <tcnative.version>2.0.11.Final</tcnative.version>
     <tcnative.classifier>${os.detected.classifier}</tcnative.classifier>
     <conscrypt.groupId>org.conscrypt</conscrypt.groupId>
     <conscrypt.artifactId>conscrypt-openjdk-uber</conscrypt.artifactId>
-    <conscrypt.version>1.0.0.RC7</conscrypt.version>
+    <conscrypt.version>1.1.3</conscrypt.version>
     <conscrypt.classifier />
     <jni.classifier>${os.detected.name}-${os.detected.arch}</jni.classifier>
     <logging.config>${project.basedir}/../common/src/test/resources/logback-test.xml</logging.config>
     <logging.logLevel>debug</logging.logLevel>
     <log4j2.version>2.6.2</log4j2.version>
-    <asm.version>5.1</asm.version>
+    <enforcer.plugin.version>1.4.1</enforcer.plugin.version>
     <testJavaHome>${env.JAVA_HOME}</testJavaHome>
     <skipOsgiTestsuite>false</skipOsgiTestsuite>
     <skipAutobahnTestsuite>false</skipAutobahnTestsuite>
+    <skipHttp2Testsuite>false</skipHttp2Testsuite>
   </properties>
 
   <modules>
@@ -237,6 +271,7 @@
     <module>example</module>
     <module>testsuite</module>
     <module>testsuite-autobahn</module>
+    <module>testsuite-http2</module>
     <module>testsuite-osgi</module>
     <module>microbench</module>
     <module>bom</module>
@@ -248,6 +283,13 @@
         <groupId>${project.groupId}</groupId>
         <artifactId>netty-dev-tools</artifactId>
         <version>${project.version}</version>
+      </dependency>
+
+      <!-- Needed for java11 and later as javax.activation is not part of the JDK anymore -->
+      <dependency>
+        <groupId>com.sun.activation</groupId>
+        <artifactId>javax.activation</artifactId>
+        <version>1.2.0</version>
       </dependency>
 
       <!-- Byte code generator - completely optional -->
@@ -370,7 +412,7 @@
       <dependency>
         <groupId>org.jctools</groupId>
         <artifactId>jctools-core</artifactId>
-        <version>2.0.2</version>
+        <version>2.1.1</version>
       </dependency>
 
       <dependency>
@@ -460,7 +502,7 @@
       <dependency>
         <groupId>org.mockito</groupId>
         <artifactId>mockito-core</artifactId>
-        <version>2.7.2</version>
+        <version>2.18.3</version>
         <scope>test</scope>
       </dependency>
       <dependency>
@@ -569,13 +611,14 @@
       <extension>
         <groupId>kr.motd.maven</groupId>
         <artifactId>os-maven-plugin</artifactId>
-        <version>1.5.0.Final</version>
+        <version>1.6.0</version>
       </extension>
     </extensions>
 
     <plugins>
       <plugin>
         <artifactId>maven-enforcer-plugin</artifactId>
+        <version>${enforcer.plugin.version}</version>
         <executions>
           <execution>
             <id>enforce-tools</id>
@@ -594,10 +637,10 @@
                 </requireMavenVersion>
                 <requireProperty>
                   <regexMessage>
-                    x86_64 JDK must be used.
+                    x86_64/AARCH64 JDK must be used.
                   </regexMessage>
                   <property>os.detected.arch</property>
-                  <regex>^x86_64$</regex>
+                  <regex>^(x86_64|aarch_64)$</regex>
                 </requireProperty>
               </rules>
             </configuration>
@@ -637,15 +680,7 @@
              be used even when compiling with java 1.7+ -->
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>animal-sniffer-maven-plugin</artifactId>
-        <version>1.11</version>
-        <dependencies>
-          <!-- Upgrade ASM and support Java 8 bytecode -->
-          <dependency>
-            <groupId>org.ow2.asm</groupId>
-            <artifactId>asm-all</artifactId>
-            <version>${asm.version}</version>
-          </dependency>
-        </dependencies>
+        <version>1.16</version>
         <configuration>
           <signature>
             <groupId>org.codehaus.mojo.signature</groupId>
@@ -700,12 +735,16 @@
             <ignore>java.util.zip.CRC32</ignore>
             <ignore>java.util.zip.Adler32</ignore>
 
+            <!-- NioDatagramChannel implementation -->
+            <ignore>java.net.ProtocolFamily</ignore>
+
             <!-- JDK 9 -->
             <ignore>java.nio.ByteBuffer</ignore>
             <ignore>java.nio.CharBuffer</ignore>
 
             <!-- JDK 8 -->
             <ignore>java.util.concurrent.atomic.LongAdder</ignore>
+            <ignore>java.util.function.BiFunction</ignore>
 
             <!-- Resolver -->
             <ignore>java.net.InetAddress</ignore>
@@ -717,6 +756,9 @@
             <ignore>java.nio.file.Path</ignore>
             <ignore>java.io.File</ignore>
           </ignores>
+          <annotations>
+            <annotation>io.netty.util.internal.SuppressJava6Requirement</annotation>
+          </annotations>
         </configuration>
         <executions>
           <execution>
@@ -814,7 +856,7 @@
             <logback.configurationFile>${logging.config}</logback.configurationFile>
             <logLevel>${logging.logLevel}</logLevel>
           </systemPropertyVariables>
-          <argLine>${argLine.common} ${argLine.alpnAgent} ${argLine.leak} ${argLine.coverage} ${argLine.noUnsafe} ${argLine.java9} ${argLine.javaProperties}</argLine>
+          <argLine>${argLine.common} ${argLine.printGC} ${argLine.alpnAgent} ${argLine.leak} ${argLine.coverage} ${argLine.noUnsafe} ${argLine.java9} ${argLine.javaProperties}</argLine>
           <properties>
             <property>
               <name>listener</name>
@@ -822,6 +864,8 @@
             </property>
           </properties>
           <jvm>${testJavaHome}/bin/java</jvm>
+           <!-- Ensure the whole stacktrace is preserved when an exception is thrown. See https://issues.apache.org/jira/browse/SUREFIRE-1457 --> 
+          <trimStackTrace>false</trimStackTrace>
         </configuration>
       </plugin>
       <!-- always produce osgi bundles -->
@@ -1100,6 +1144,9 @@
                   <manifest>
                     <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                   </manifest>
+                  <manifestEntries>
+                    <Automatic-Module-Name>${javaModuleName}</Automatic-Module-Name>
+                  </manifestEntries>
                   <index>true</index>
                   <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
                 </archive>
@@ -1155,7 +1202,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
-          <version>2.4.3</version>
+          <version>3.1.0</version>
         </plugin>
 
         <!-- Workaround for the 'M2E plugin execution not covered' problem.

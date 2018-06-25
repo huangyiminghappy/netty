@@ -16,6 +16,7 @@
 package io.netty.util.concurrent;
 
 import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
@@ -582,7 +583,18 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         gracefulShutdownTimeout = unit.toNanos(timeout);
 
         if (oldState == ST_NOT_STARTED) {
-            doStartThread();
+            try {
+                doStartThread();
+            } catch (Throwable cause) {
+                STATE_UPDATER.set(this, ST_TERMINATED);
+                terminationFuture.tryFailure(cause);
+
+                if (!(cause instanceof Exception)) {
+                    // Also rethrow as it may be an OOME for example
+                    PlatformDependent.throwException(cause);
+                }
+                return terminationFuture;
+            }
         }
 
         if (wakeup) {
@@ -634,7 +646,18 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
 
         if (oldState == ST_NOT_STARTED) {
-            doStartThread();
+            try {
+                doStartThread();
+            } catch (Throwable cause) {
+                STATE_UPDATER.set(this, ST_TERMINATED);
+                terminationFuture.tryFailure(cause);
+
+                if (!(cause instanceof Exception)) {
+                    // Also rethrow as it may be an OOME for example
+                    PlatformDependent.throwException(cause);
+                }
+                return;
+            }
         }
 
         if (wakeup) {
@@ -739,11 +762,9 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
 
         boolean inEventLoop = inEventLoop();
-        if (inEventLoop) {
-            addTask(task);
-        } else {
+        addTask(task);
+        if (!inEventLoop) {
             startThread();
-            addTask(task);
             if (isShutdown() && removeTask(task)) {
                 reject();
             }
@@ -837,7 +858,12 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     private void startThread() {
         if (state == ST_NOT_STARTED) {
             if (STATE_UPDATER.compareAndSet(this, ST_NOT_STARTED, ST_STARTED)) {
-                doStartThread();
+                try {
+                    doStartThread();
+                } catch (Throwable cause) {
+                    STATE_UPDATER.set(this, ST_NOT_STARTED);
+                    PlatformDependent.throwException(cause);
+                }
             }
         }
     }
@@ -870,9 +896,11 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
                     // Check if confirmShutdown() was called at the end of the loop.
                     if (success && gracefulShutdownStartTime == 0) {
-                        logger.error("Buggy " + EventExecutor.class.getSimpleName() + " implementation; " +
-                                SingleThreadEventExecutor.class.getSimpleName() + ".confirmShutdown() must be called " +
-                                "before run() implementation terminates.");
+                        if (logger.isErrorEnabled()) {
+                            logger.error("Buggy " + EventExecutor.class.getSimpleName() + " implementation; " +
+                                    SingleThreadEventExecutor.class.getSimpleName() + ".confirmShutdown() must " +
+                                    "be called before run() implementation terminates.");
+                        }
                     }
 
                     try {
@@ -889,9 +917,10 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                             STATE_UPDATER.set(SingleThreadEventExecutor.this, ST_TERMINATED);
                             threadLock.release();
                             if (!taskQueue.isEmpty()) {
-                                logger.warn(
-                                        "An event executor terminated with " +
-                                                "non-empty task queue (" + taskQueue.size() + ')');
+                                if (logger.isWarnEnabled()) {
+                                    logger.warn("An event executor terminated with " +
+                                            "non-empty task queue (" + taskQueue.size() + ')');
+                                }
                             }
 
                             terminationFuture.setSuccess(null);

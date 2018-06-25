@@ -19,7 +19,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.14.Final-SNAPSHOT</version>
+    <version>4.1.26.Final-SNAPSHOT</version>
   </parent>
   <artifactId>netty-transport-native-kqueue</artifactId>
 
@@ -70,6 +70,7 @@
               <execution>
                 <id>build-native-lib</id>
                 <configuration>
+                  <name>netty_transport_native_kqueue_${os.detected.arch}</name>
                   <nativeSourceDirectory>${project.basedir}/src/main/c</nativeSourceDirectory>
                   <libDirectory>${project.build.outputDirectory}</libDirectory>
                   <!-- We use Maven's artifact classifier instead.
@@ -109,7 +110,8 @@
                       <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                     </manifest>
                     <manifestEntries>
-                      <Bundle-NativeCode>META-INF/native/libnetty-transport-native-kqueue.jnilib; osname=darwin, processor=x86_64"</Bundle-NativeCode>
+                      <Bundle-NativeCode>META-INF/native/libnetty_transport_native_kqueue_${os.detected.arch}.jnilib; osname=MacOSX, processor=${os.detected.arch}"</Bundle-NativeCode>
+                      <Automatic-Module-Name>${javaModuleName}</Automatic-Module-Name>
                     </manifestEntries>
                     <index>true</index>
                     <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
@@ -178,6 +180,7 @@
               <execution>
                 <id>build-native-lib</id>
                 <configuration>
+                  <name>netty_transport_native_kqueue_${os.detected.arch}</name>
                   <nativeSourceDirectory>${project.basedir}/src/main/c</nativeSourceDirectory>
                   <libDirectory>${project.build.outputDirectory}</libDirectory>
                   <!-- We use Maven's artifact classifier instead.
@@ -215,7 +218,7 @@
                       <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                     </manifest>
                     <manifestEntries>
-                      <Bundle-NativeCode>META-INF/native/libnetty-transport-native-kqueue.jnilib; osname=darwin, processor=x86_64"</Bundle-NativeCode>
+                      <Bundle-NativeCode>META-INF/native/libnetty_transport_native_kqueue_${os.detected.arch}.jnilib; osname=OpenBSD, processor=${os.detected.arch}"</Bundle-NativeCode>
                     </manifestEntries>
                     <index>true</index>
                     <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
@@ -284,6 +287,7 @@
               <execution>
                 <id>build-native-lib</id>
                 <configuration>
+                  <name>netty_transport_native_kqueue_${os.detected.arch}</name>
                   <nativeSourceDirectory>${project.basedir}/src/main/c</nativeSourceDirectory>
                   <libDirectory>${project.build.outputDirectory}</libDirectory>
                   <!-- We use Maven's artifact classifier instead.
@@ -321,7 +325,7 @@
                       <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                     </manifest>
                     <manifestEntries>
-                      <Bundle-NativeCode>META-INF/native/libnetty-transport-native-kqueue.jnilib; osname=darwin, processor=x86_64"</Bundle-NativeCode>
+                      <Bundle-NativeCode>META-INF/native/libnetty_transport_native_kqueue_${os.detected.arch}.jnilib; osname=FreeBSD, processor=${os.detected.arch}"</Bundle-NativeCode>
                     </manifestEntries>
                     <index>true</index>
                     <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
@@ -350,6 +354,7 @@
   </profiles>
 
   <properties>
+    <javaModuleName>io.netty.transport.kqueue</javaModuleName>
     <!-- Needed by the native transport as we need the memoryAddress of the ByteBuffer -->
     <argLine.java9.extras>--add-exports java.base/sun.security.x509=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED</argLine.java9.extras>
     <unix.common.lib.name>netty-unix-common</unix.common.lib.name>

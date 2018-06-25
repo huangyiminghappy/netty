@@ -24,6 +24,7 @@
 static jclass runtimeExceptionClass = NULL;
 static jclass channelExceptionClass = NULL;
 static jclass ioExceptionClass = NULL;
+static jclass portUnreachableExceptionClass = NULL;
 static jclass closedChannelExceptionClass = NULL;
 static jmethodID closedChannelExceptionMethodId = NULL;
 
@@ -56,6 +57,10 @@ void netty_unix_errors_throwIOException(JNIEnv* env, char* message) {
     (*env)->ThrowNew(env, ioExceptionClass, message);
 }
 
+void netty_unix_errors_throwPortUnreachableException(JNIEnv* env, char* message) {
+    (*env)->ThrowNew(env, portUnreachableExceptionClass, message);
+}
+
 void netty_unix_errors_throwIOExceptionErrorNo(JNIEnv* env, char* message, int errorNumber) {
     char* allocatedMessage = exceptionMessage(message, errorNumber);
     (*env)->ThrowNew(env, ioExceptionClass, allocatedMessage);
@@ -73,6 +78,10 @@ void netty_unix_errors_throwOutOfMemoryError(JNIEnv* env) {
 }
 
 // JNI Registered Methods Begin
+static jint netty_unix_errors_errnoENOENT(JNIEnv* env, jclass clazz) {
+    return ENOENT;
+}
+
 static jint netty_unix_errors_errnoENOTCONN(JNIEnv* env, jclass clazz) {
     return ENOTCONN;
 }
@@ -124,6 +133,7 @@ static jstring netty_unix_errors_strError(JNIEnv* env, jclass clazz, jint error)
 
 // JNI Method Registration Table Begin
 static const JNINativeMethod statically_referenced_fixed_method_table[] = {
+  { "errnoENOENT", "()I", (void *) netty_unix_errors_errnoENOENT },
   { "errnoENOTCONN", "()I", (void *) netty_unix_errors_errnoENOTCONN },
   { "errnoEBADF", "()I", (void *) netty_unix_errors_errnoEBADF },
   { "errnoEPIPE", "()I", (void *) netty_unix_errors_errnoEPIPE },
@@ -207,6 +217,18 @@ jint netty_unix_errors_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
         return JNI_ERR;
     }
 
+    jclass localPortUnreachableExceptionClass = (*env)->FindClass(env, "java/net/PortUnreachableException");
+    if (localPortUnreachableExceptionClass == NULL) {
+        // pending exception...
+        return JNI_ERR;
+    }
+    portUnreachableExceptionClass = (jclass) (*env)->NewGlobalRef(env, localPortUnreachableExceptionClass);
+    if (portUnreachableExceptionClass == NULL) {
+        // out-of-memory!
+        netty_unix_errors_throwOutOfMemoryError(env);
+        return JNI_ERR;
+    }
+
     return NETTY_JNI_VERSION;
 }
 
@@ -223,6 +245,10 @@ void netty_unix_errors_JNI_OnUnLoad(JNIEnv* env) {
     if (ioExceptionClass != NULL) {
         (*env)->DeleteGlobalRef(env, ioExceptionClass);
         ioExceptionClass = NULL;
+    }
+    if (portUnreachableExceptionClass != NULL) {
+        (*env)->DeleteGlobalRef(env, portUnreachableExceptionClass);
+        portUnreachableExceptionClass = NULL;
     }
     if (closedChannelExceptionClass != NULL) {
         (*env)->DeleteGlobalRef(env, closedChannelExceptionClass);
